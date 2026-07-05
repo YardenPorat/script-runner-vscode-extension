@@ -1,0 +1,11 @@
+src/**
+tsconfig.json
+node_modules/**
+.claude/**
+out-packaged/**
+script-runner.config.json
+.gitignore
+.history/**
+TODO.md
+CLAUDE.md
+example/**

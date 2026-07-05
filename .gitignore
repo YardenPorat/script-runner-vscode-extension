@@ -1,0 +1,6 @@
+node_modules
+out-js
+out-packaged
+*.vsix
+.history
+.claude/settings.local.json

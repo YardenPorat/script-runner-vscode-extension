@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "#compile": {
+      "group": "Starred",
+      "comment": "sdfsdfsdfsdf"
+    },
+    "#package": {
+      "comment": "test comment"
+    }
+  }
+}

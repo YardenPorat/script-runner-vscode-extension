@@ -1,0 +1,5 @@
+{
+  "scripts": {
+    "example2": "echo example script 2"
+  }
+}

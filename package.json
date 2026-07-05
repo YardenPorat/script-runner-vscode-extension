@@ -1,0 +1,189 @@
+{
+  "name": "monorepo-script-runner",
+  "displayName": "Monorepo Script Runner",
+  "description": "Discover, group, annotate and run package.json scripts across a monorepo. Config persists to a committable JSON file.",
+  "version": "0.6.1",
+  "publisher": "xaria",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out-js/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/package.json"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "scriptRunner",
+          "title": "Script Runner",
+          "icon": "$(run-all)"
+        }
+      ]
+    },
+    "views": {
+      "scriptRunner": [
+        {
+          "id": "scriptRunner.scripts",
+          "name": "Scripts",
+          "icon": "$(run-all)"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "scriptRunner.refresh",
+        "title": "Refresh Scripts",
+        "category": "Script Runner",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "scriptRunner.search",
+        "title": "Search Scripts…",
+        "category": "Script Runner",
+        "icon": "$(search)"
+      },
+      {
+        "command": "scriptRunner.run",
+        "title": "Run Script",
+        "category": "Script Runner",
+        "icon": "$(play)"
+      },
+      {
+        "command": "scriptRunner.assignGroup",
+        "title": "Assign Group…",
+        "category": "Script Runner",
+        "icon": "$(folder)"
+      },
+      {
+        "command": "scriptRunner.editComment",
+        "title": "Edit Comment…",
+        "category": "Script Runner",
+        "icon": "$(comment)"
+      },
+      {
+        "command": "scriptRunner.openConfig",
+        "title": "Open Config File",
+        "category": "Script Runner",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "scriptRunner.openInEditor",
+        "title": "Open in Editor",
+        "category": "Script Runner",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "scriptRunner.renameGroup",
+        "title": "Rename Group…",
+        "category": "Script Runner"
+      },
+      {
+        "command": "scriptRunner.removeFromGroup",
+        "title": "Remove from Group",
+        "category": "Script Runner"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "scriptRunner.search",
+          "when": "view == scriptRunner.scripts",
+          "group": "navigation@0"
+        },
+        {
+          "command": "scriptRunner.refresh",
+          "when": "view == scriptRunner.scripts",
+          "group": "navigation@1"
+        },
+        {
+          "command": "scriptRunner.openInEditor",
+          "when": "view == scriptRunner.scripts",
+          "group": "navigation@2"
+        },
+        {
+          "command": "scriptRunner.openConfig",
+          "when": "view == scriptRunner.scripts",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "scriptRunner.run",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "inline@1"
+        },
+        {
+          "command": "scriptRunner.assignGroup",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "1_edit@1"
+        },
+        {
+          "command": "scriptRunner.editComment",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "1_edit@2"
+        },
+        {
+          "command": "scriptRunner.removeFromGroup",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "1_edit@3"
+        },
+        {
+          "command": "scriptRunner.renameGroup",
+          "when": "view == scriptRunner.scripts && viewItem == group",
+          "group": "1_edit@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Script Runner",
+      "properties": {
+        "scriptRunner.configFile": {
+          "type": "string",
+          "default": "script-runner.config.json",
+          "description": "Path of the committable config file, relative to the workspace root."
+        },
+        "scriptRunner.packageManager": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "npm",
+            "yarn",
+            "pnpm",
+            "bun"
+          ],
+          "default": "auto",
+          "description": "Package manager used to run scripts. 'auto' detects from lockfiles."
+        },
+        "scriptRunner.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/out/**",
+            "**/.git/**"
+          ],
+          "description": "Glob patterns excluded when scanning for package.json files."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "mkdir -p out-packaged && vsce package --allow-missing-repository -o out-packaged/"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.4.0"
+  }
+}
