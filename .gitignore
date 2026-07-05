@@ -4,3 +4,4 @@ out-packaged
 *.vsix
 .history
 .claude/settings.local.json
+.DS_Store

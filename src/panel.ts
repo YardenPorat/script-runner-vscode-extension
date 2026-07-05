@@ -227,7 +227,7 @@ export class ScriptPanel {
     .hidden { display: none; }
 </style>
 </head>
-<body>
+<body data-vscode-context='{"preventDefaultContextMenuItems":true}'>
 <div id="toolbar">
     <input id="search" type="text" placeholder="Filter scripts…" autocomplete="off" />
     <button id="refresh" title="Refresh">Refresh</button>
@@ -285,6 +285,7 @@ function actionBtn(svg, title, type, id) {
 function scriptNode(s) {
     const row = el('div', 'script');
     row.dataset.search = (s.name + ' ' + (s.location || '') + ' ' + (s.comment || '') + ' ' + s.command).toLowerCase();
+    row.dataset.vscodeContext = JSON.stringify({ webviewSection: 'srScript', scriptId: s.id, preventDefaultContextMenuItems: true });
     row.title = s.command;
     row.appendChild(iconEl(ICONS.script));
     row.appendChild(el('span', 'name', s.name));

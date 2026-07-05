@@ -26,6 +26,14 @@ async function resolveScript(provider: ScriptTreeProvider, item: unknown, placeH
     if (item instanceof ScriptItem) {
         return item.script;
     }
+    // Webview context menus pass the element's data-vscode-context object.
+    if (item && typeof item === 'object' && typeof (item as { scriptId?: unknown }).scriptId === 'string') {
+        const id = (item as { scriptId: string }).scriptId;
+        const found = (await provider.ensureScripts()).find((s) => s.id === id);
+        if (found) {
+            return found;
+        }
+    }
     return pickScript(provider, placeHolder);
 }
 
@@ -126,6 +134,33 @@ export function activate(context: vscode.ExtensionContext): void {
             }
             await store.update(script.id, { group: undefined, comment: script.comment });
             provider.refresh();
+        }),
+
+        vscode.commands.registerCommand('scriptRunner.copyCommand', async (item?: unknown) => {
+            const script = await resolveScript(provider, item, 'Select a script to copy its command');
+            if (script) {
+                await vscode.env.clipboard.writeText(script.command);
+                vscode.window.setStatusBarMessage(`Copied command: ${script.command}`, 2000);
+            }
+        }),
+
+        vscode.commands.registerCommand('scriptRunner.copyCommandName', async (item?: unknown) => {
+            const script = await resolveScript(provider, item, 'Select a script to copy its name');
+            if (script) {
+                await vscode.env.clipboard.writeText(script.name);
+                vscode.window.setStatusBarMessage(`Copied name: ${script.name}`, 2000);
+            }
+        }),
+
+        vscode.commands.registerCommand('scriptRunner.openTerminalHere', async (item?: unknown) => {
+            const script = await resolveScript(provider, item, 'Select a script to open a terminal in its dir');
+            if (script) {
+                const terminal = vscode.window.createTerminal({
+                    name: `${script.packageName}: ${script.pkgRelDir || 'root'}`,
+                    cwd: script.pkgDir,
+                });
+                terminal.show();
+            }
         }),
 
         vscode.commands.registerCommand('scriptRunner.renameGroup', async (item?: unknown) => {

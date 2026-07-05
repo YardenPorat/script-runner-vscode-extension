@@ -2,7 +2,7 @@
   "name": "monorepo-script-runner",
   "displayName": "Monorepo Script Runner",
   "description": "Discover, group, annotate and run package.json scripts across a monorepo. Config persists to a committable JSON file.",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "publisher": "xaria",
   "license": "MIT",
   "engines": {
@@ -86,6 +86,24 @@
         "command": "scriptRunner.removeFromGroup",
         "title": "Remove from Group",
         "category": "Script Runner"
+      },
+      {
+        "command": "scriptRunner.copyCommand",
+        "title": "Copy Command",
+        "category": "Script Runner",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "scriptRunner.copyCommandName",
+        "title": "Copy Command Name",
+        "category": "Script Runner",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "scriptRunner.openTerminalHere",
+        "title": "Open Terminal in Working Dir",
+        "category": "Script Runner",
+        "icon": "$(terminal)"
       }
     ],
     "menus": {
@@ -133,9 +151,41 @@
           "group": "1_edit@3"
         },
         {
+          "command": "scriptRunner.copyCommand",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "2_copy@1"
+        },
+        {
+          "command": "scriptRunner.copyCommandName",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "2_copy@2"
+        },
+        {
+          "command": "scriptRunner.openTerminalHere",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "3_terminal@1"
+        },
+        {
           "command": "scriptRunner.renameGroup",
           "when": "view == scriptRunner.scripts && viewItem == group",
           "group": "1_edit@1"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "scriptRunner.copyCommand",
+          "when": "webviewSection == 'srScript'",
+          "group": "1_copy@1"
+        },
+        {
+          "command": "scriptRunner.copyCommandName",
+          "when": "webviewSection == 'srScript'",
+          "group": "1_copy@2"
+        },
+        {
+          "command": "scriptRunner.openTerminalHere",
+          "when": "webviewSection == 'srScript'",
+          "group": "2_terminal@1"
         }
       ]
     },
