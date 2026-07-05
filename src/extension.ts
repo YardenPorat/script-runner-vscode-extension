@@ -37,12 +37,34 @@ async function resolveScript(provider: ScriptTreeProvider, item: unknown, placeH
     return pickScript(provider, placeHolder);
 }
 
-async function assignGroupTo(store: ConfigStore, provider: ScriptTreeProvider, script: ScriptInfo): Promise<void> {
+// Context-menu commands are called with (clickedItem, allSelectedItems) when
+// canSelectMany is on. Prefer the full selection; fall back to the single item.
+async function resolveScripts(
+    provider: ScriptTreeProvider,
+    item: unknown,
+    items: unknown,
+    placeHolder: string,
+): Promise<ScriptInfo[]> {
+    if (Array.isArray(items)) {
+        const scripts = items.filter((i): i is ScriptItem => i instanceof ScriptItem).map((i) => i.script);
+        if (scripts.length > 1) {
+            return scripts;
+        }
+    }
+    const single = await resolveScript(provider, item, placeHolder);
+    return single ? [single] : [];
+}
+
+async function assignGroupTo(store: ConfigStore, provider: ScriptTreeProvider, scripts: ScriptInfo[]): Promise<void> {
+    if (!scripts.length) {
+        return;
+    }
     const existing = provider.getGroups();
     const NEW_GROUP = '$(add) New group…';
     const NO_GROUP = '$(close) Remove from group';
+    const label = scripts.length === 1 ? `"${scripts[0].name}"` : `${scripts.length} scripts`;
     const picked = await vscode.window.showQuickPick([NEW_GROUP, NO_GROUP, ...existing], {
-        placeHolder: `Group for "${script.name}"`,
+        placeHolder: `Group for ${label}`,
     });
     if (picked === undefined) {
         return;
@@ -62,7 +84,11 @@ async function assignGroupTo(store: ConfigStore, provider: ScriptTreeProvider, s
     } else {
         group = picked;
     }
-    await store.update(script.id, { group, comment: script.comment });
+    const config = await store.load();
+    for (const script of scripts) {
+        config.scripts[script.id] = { ...config.scripts[script.id], group };
+    }
+    await store.save(config);
     provider.refresh();
 }
 
@@ -94,7 +120,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
         vscode.commands.registerCommand('scriptRunner.openInEditor', () => {
             ScriptPanel.createOrShow(context, provider, store, {
-                assignGroup: (script) => assignGroupTo(store, provider, script),
+                assignGroup: (scripts) => assignGroupTo(store, provider, scripts),
                 editComment: (script) => editCommentFor(store, provider, script),
             });
         }),
@@ -113,11 +139,9 @@ export function activate(context: vscode.ExtensionContext): void {
             }
         }),
 
-        vscode.commands.registerCommand('scriptRunner.assignGroup', async (item?: unknown) => {
-            const script = await resolveScript(provider, item, 'Select a script to group');
-            if (script) {
-                await assignGroupTo(store, provider, script);
-            }
+        vscode.commands.registerCommand('scriptRunner.assignGroup', async (item?: unknown, items?: unknown) => {
+            const scripts = await resolveScripts(provider, item, items, 'Select a script to group');
+            await assignGroupTo(store, provider, scripts);
         }),
 
         vscode.commands.registerCommand('scriptRunner.editComment', async (item?: unknown) => {
@@ -127,12 +151,16 @@ export function activate(context: vscode.ExtensionContext): void {
             }
         }),
 
-        vscode.commands.registerCommand('scriptRunner.removeFromGroup', async (item?: unknown) => {
-            const script = await resolveScript(provider, item, 'Select a script to ungroup');
-            if (!script) {
+        vscode.commands.registerCommand('scriptRunner.removeFromGroup', async (item?: unknown, items?: unknown) => {
+            const scripts = await resolveScripts(provider, item, items, 'Select a script to ungroup');
+            if (!scripts.length) {
                 return;
             }
-            await store.update(script.id, { group: undefined, comment: script.comment });
+            const config = await store.load();
+            for (const script of scripts) {
+                config.scripts[script.id] = { ...config.scripts[script.id], group: undefined };
+            }
+            await store.save(config);
             provider.refresh();
         }),
 

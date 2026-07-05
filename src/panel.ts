@@ -119,7 +119,7 @@ async function buildData(provider: ScriptTreeProvider, store: ConfigStore): Prom
 }
 
 export interface PanelHandlers {
-    assignGroup(script: ScriptInfo): Promise<void>;
+    assignGroup(scripts: ScriptInfo[]): Promise<void>;
     editComment(script: ScriptInfo): Promise<void>;
 }
 
@@ -156,12 +156,17 @@ export class ScriptPanel {
         private readonly handlers: PanelHandlers,
     ) {
         panel.webview.onDidReceiveMessage(
-            (msg: { type: string; id?: string }) => {
-                const script = msg.id ? this.provider.getScripts().find((s) => s.id === msg.id) : undefined;
+            (msg: { type: string; id?: string; ids?: string[] }) => {
+                const all = this.provider.getScripts();
+                const script = msg.id ? all.find((s) => s.id === msg.id) : undefined;
                 if (msg.type === 'run' && script) {
                     runScript(script);
-                } else if (msg.type === 'assignGroup' && script) {
-                    void this.handlers.assignGroup(script);
+                } else if (msg.type === 'assignGroup') {
+                    const ids = msg.ids ?? (msg.id ? [msg.id] : []);
+                    const scripts = ids.map((id) => all.find((s) => s.id === id)).filter((s): s is ScriptInfo => !!s);
+                    if (scripts.length) {
+                        void this.handlers.assignGroup(scripts);
+                    }
                 } else if (msg.type === 'editComment' && script) {
                     void this.handlers.editComment(script);
                 } else if (msg.type === 'refresh') {
@@ -216,6 +221,12 @@ export class ScriptPanel {
     .script-icon { color: var(--vscode-terminal-ansiGreen, var(--vscode-foreground)); }
     .script { display: flex; align-items: center; gap: 6px; padding: 3px 4px 3px 20px; border-radius: 3px; cursor: pointer; }
     .script:hover { background: var(--vscode-list-hoverBackground); }
+    .script.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
+    #selbar { position: sticky; top: 41px; display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border-bottom: 1px solid var(--vscode-panel-border); z-index: 1; }
+    #selbar button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
+    #selbar button:hover { background: var(--vscode-button-hoverBackground); }
+    #selbar #clearSel { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
+    #selcount { color: var(--vscode-descriptionForeground); }
     .script .name { font-weight: 500; flex: 0 0 auto; }
     .script .cmd { color: var(--vscode-descriptionForeground); opacity: 0.65; font-family: var(--vscode-editor-font-family, monospace); font-size: 0.85em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .script .meta { color: var(--vscode-descriptionForeground); font-size: 0.85em; flex: 0 0 auto; }
@@ -232,14 +243,58 @@ export class ScriptPanel {
     <input id="search" type="text" placeholder="Filter scripts…" autocomplete="off" />
     <button id="refresh" title="Refresh">Refresh</button>
 </div>
+<div id="selbar" class="hidden">
+    <span id="selcount"></span>
+    <button id="assignSel" title="Assign selected scripts to a group">Assign to group…</button>
+    <button id="clearSel" title="Clear selection">Clear</button>
+</div>
 <div id="tree"><div class="empty">Loading…</div></div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 const treeEl = document.getElementById('tree');
 const searchEl = document.getElementById('search');
+const selbarEl = document.getElementById('selbar');
+const selcountEl = document.getElementById('selcount');
 let currentData = null;
 
+const selected = new Set();
+let lastIndex = -1;
+
+function visibleScripts() {
+    return [...treeEl.querySelectorAll('.script:not(.hidden)')];
+}
+function updateSelUI() {
+    for (const row of treeEl.querySelectorAll('.script')) {
+        row.classList.toggle('selected', selected.has(row.dataset.id));
+    }
+    selbarEl.classList.toggle('hidden', selected.size === 0);
+    selcountEl.textContent = selected.size + ' selected';
+}
+function clearSel() {
+    selected.clear();
+    lastIndex = -1;
+    updateSelUI();
+}
+function pruneSel() {
+    const present = new Set([...treeEl.querySelectorAll('.script')].map((r) => r.dataset.id));
+    for (const id of [...selected]) {
+        if (!present.has(id)) selected.delete(id);
+    }
+    lastIndex = -1;
+    updateSelUI();
+}
+
 document.getElementById('refresh').addEventListener('click', () => vscode.postMessage({ type: 'refresh' }));
+document.getElementById('assignSel').addEventListener('click', () => {
+    if (selected.size) vscode.postMessage({ type: 'assignGroup', ids: [...selected] });
+});
+document.getElementById('clearSel').addEventListener('click', clearSel);
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && selected.size) {
+        e.preventDefault();
+        clearSel();
+    }
+});
 searchEl.addEventListener('input', () => applyFilter(searchEl.value.trim().toLowerCase()));
 
 window.addEventListener('message', (e) => {
@@ -247,6 +302,7 @@ window.addEventListener('message', (e) => {
         currentData = e.data.data;
         renderTree(currentData);
         applyFilter(searchEl.value.trim().toLowerCase());
+        pruneSel();
     }
 });
 
@@ -284,6 +340,7 @@ function actionBtn(svg, title, type, id) {
 
 function scriptNode(s) {
     const row = el('div', 'script');
+    row.dataset.id = s.id;
     row.dataset.search = (s.name + ' ' + (s.location || '') + ' ' + (s.comment || '') + ' ' + s.command).toLowerCase();
     row.dataset.vscodeContext = JSON.stringify({ webviewSection: 'srScript', scriptId: s.id, preventDefaultContextMenuItems: true });
     row.title = s.command;
@@ -296,7 +353,27 @@ function scriptNode(s) {
     actions.appendChild(actionBtn(ICONS.tag, 'Assign group…', 'assignGroup', s.id));
     actions.appendChild(actionBtn(ICONS.comment, 'Edit comment…', 'editComment', s.id));
     row.appendChild(actions);
-    row.addEventListener('click', () => vscode.postMessage({ type: 'run', id: s.id }));
+    row.addEventListener('click', (e) => {
+        const rows = visibleScripts();
+        const idx = rows.indexOf(row);
+        if (e.shiftKey) {
+            e.preventDefault();
+            window.getSelection().removeAllRanges();
+            if (lastIndex < 0) lastIndex = idx;
+            const lo = Math.min(lastIndex, idx);
+            const hi = Math.max(lastIndex, idx);
+            for (let i = lo; i <= hi; i++) selected.add(rows[i].dataset.id);
+            updateSelUI();
+        } else if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            selected.add(s.id);
+            lastIndex = idx;
+            updateSelUI();
+        } else {
+            if (selected.size) clearSel();
+            vscode.postMessage({ type: 'run', id: s.id });
+        }
+    });
     return row;
 }
 
