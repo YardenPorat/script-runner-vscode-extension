@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo } from './model';
 import { ScriptTreeProvider } from './tree';
 import { runScript } from './runner';
+import { buildFolderTree, dropFolders, dropScripts, OrderedFolder, ScriptDropTarget, sortScripts } from './order';
 
 interface PanelScript {
     id: string;
@@ -9,10 +10,15 @@ interface PanelScript {
     command: string;
     comment?: string;
     location?: string;
+    /** Workspace-relative dir of the script's package ('' for root) */
+    dir: string;
+    /** Group this script belongs to, if any */
+    group?: string;
 }
 
 interface PanelFolder {
     label: string;
+    path: string;
     count: number;
     folders: PanelFolder[];
     scripts: PanelScript[];
@@ -29,11 +35,6 @@ interface PanelData {
     tree: PanelFolder;
 }
 
-interface DirNode {
-    dirs: Map<string, DirNode>;
-    scripts: ScriptInfo[];
-}
-
 function toPanelScript(s: ScriptInfo, showLocation: boolean): PanelScript {
     return {
         id: s.id,
@@ -41,52 +42,19 @@ function toPanelScript(s: ScriptInfo, showLocation: boolean): PanelScript {
         command: s.command,
         comment: s.comment,
         location: showLocation ? s.pkgRelDir || '(root)' : undefined,
+        dir: s.pkgRelDir,
+        group: s.group,
     };
 }
 
-function buildFolderTree(scripts: ScriptInfo[]): PanelFolder {
-    const root: DirNode = { dirs: new Map(), scripts: [] };
-    for (const script of scripts) {
-        let node = root;
-        if (script.pkgRelDir) {
-            for (const segment of script.pkgRelDir.split('/')) {
-                let child = node.dirs.get(segment);
-                if (!child) {
-                    child = { dirs: new Map(), scripts: [] };
-                    node.dirs.set(segment, child);
-                }
-                node = child;
-            }
-        }
-        node.scripts.push(script);
-    }
-
-    const countScripts = (node: DirNode): number =>
-        node.scripts.length + [...node.dirs.values()].reduce((sum, d) => sum + countScripts(d), 0);
-
-    const toFolder = (label: string, node: DirNode): PanelFolder => {
-        const folders = [...node.dirs.entries()]
-            .sort(([a], [b]) => a.localeCompare(b))
-            .map(([name, child]) => {
-                // Compact single-child chains with no scripts of their own: a/b/c
-                let lbl = name;
-                let c = child;
-                while (c.scripts.length === 0 && c.dirs.size === 1) {
-                    const [nextName, nextChild] = c.dirs.entries().next().value as [string, DirNode];
-                    lbl += `/${nextName}`;
-                    c = nextChild;
-                }
-                return toFolder(lbl, c);
-            });
-        return {
-            label,
-            count: countScripts(node),
-            folders,
-            scripts: node.scripts.map((s) => toPanelScript(s, false)),
-        };
+function toPanelFolder(f: OrderedFolder): PanelFolder {
+    return {
+        label: f.label,
+        path: f.path,
+        count: f.count,
+        folders: f.folders.map(toPanelFolder),
+        scripts: f.scripts.map((s) => toPanelScript(s, false)),
     };
-
-    return toFolder('', root);
 }
 
 async function buildData(provider: ScriptTreeProvider, store: ConfigStore): Promise<PanelData> {
@@ -111,11 +79,11 @@ async function buildData(provider: ScriptTreeProvider, store: ConfigStore): Prom
     ];
 
     const groups: PanelGroup[] = orderedGroups.map((name) => {
-        const list = grouped.get(name) ?? [];
+        const list = sortScripts(grouped.get(name) ?? []);
         return { name, count: list.length, scripts: list.map((s) => toPanelScript(s, true)) };
     });
 
-    return { groups, tree: buildFolderTree(ungrouped) };
+    return { groups, tree: toPanelFolder(buildFolderTree(ungrouped, config.folders ?? {})) };
 }
 
 export interface PanelHandlers {
@@ -156,7 +124,14 @@ export class ScriptPanel {
         private readonly handlers: PanelHandlers,
     ) {
         panel.webview.onDidReceiveMessage(
-            (msg: { type: string; id?: string; ids?: string[] }) => {
+            (msg: {
+                type: string;
+                id?: string;
+                ids?: string[];
+                target?: ScriptDropTarget;
+                paths?: string[];
+                beforePath?: string;
+            }) => {
                 const all = this.provider.getScripts();
                 const script = msg.id ? all.find((s) => s.id === msg.id) : undefined;
                 if (msg.type === 'run' && script) {
@@ -169,6 +144,10 @@ export class ScriptPanel {
                     }
                 } else if (msg.type === 'editComment' && script) {
                     void this.handlers.editComment(script);
+                } else if (msg.type === 'dropScripts' && msg.ids?.length && msg.target) {
+                    void dropScripts(this.store, all, msg.ids, msg.target).then(() => this.provider.refresh());
+                } else if (msg.type === 'dropFolders' && msg.paths?.length) {
+                    void dropFolders(this.store, all, msg.paths, msg.beforePath).then(() => this.provider.refresh());
                 } else if (msg.type === 'refresh') {
                     this.provider.refresh();
                 } else if (msg.type === 'ready') {
@@ -225,6 +204,7 @@ export class ScriptPanel {
     #selbar { position: sticky; top: 41px; display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border-bottom: 1px solid var(--vscode-panel-border); z-index: 1; }
     #selbar button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
     #selbar button:hover { background: var(--vscode-button-hoverBackground); }
+    #selbar button:disabled { opacity: 0.4; cursor: default; }
     #selbar #clearSel { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); }
     #selcount { color: var(--vscode-descriptionForeground); }
     .script .name { font-weight: 500; flex: 0 0 auto; }
@@ -236,6 +216,10 @@ export class ScriptPanel {
     .action:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
     .empty { color: var(--vscode-descriptionForeground); padding: 20px; text-align: center; }
     .hidden { display: none; }
+    .drop-before { box-shadow: inset 0 2px 0 0 var(--vscode-focusBorder); }
+    .drop-after { box-shadow: inset 0 -2px 0 0 var(--vscode-focusBorder); }
+    .drop-into { background: var(--vscode-list-dropBackground, var(--vscode-list-hoverBackground)) !important; outline: 1px dashed var(--vscode-focusBorder); }
+    .dragging { opacity: 0.5; }
 </style>
 </head>
 <body data-vscode-context='{"preventDefaultContextMenuItems":true}'>
@@ -260,6 +244,10 @@ let currentData = null;
 const selected = new Set();
 let lastIndex = -1;
 
+let dragKind = null; // 'script' | 'folder'
+let dragIds = [];
+let dragPath = null;
+
 function visibleScripts() {
     return [...treeEl.querySelectorAll('.script:not(.hidden)')];
 }
@@ -268,6 +256,7 @@ function updateSelUI() {
         row.classList.toggle('selected', selected.has(row.dataset.id));
     }
     selbarEl.classList.toggle('hidden', selected.size === 0);
+    document.getElementById('assignSel').disabled = selected.size === 0;
     selcountEl.textContent = selected.size + ' selected';
 }
 function clearSel() {
@@ -296,6 +285,111 @@ document.addEventListener('keydown', (e) => {
     }
 });
 searchEl.addEventListener('input', () => applyFilter(searchEl.value.trim().toLowerCase()));
+
+function endDrag() {
+    dragKind = null;
+    dragIds = [];
+    dragPath = null;
+    clearIndicator();
+}
+function clearIndicator() {
+    for (const el of treeEl.querySelectorAll('.drop-before,.drop-after,.drop-into')) {
+        el.classList.remove('drop-before', 'drop-after', 'drop-into');
+    }
+}
+function nextSibling(el, match) {
+    let n = el.nextElementSibling;
+    while (n && !match(n)) n = n.nextElementSibling;
+    return n;
+}
+function dropInfo(e) {
+    if (dragKind === 'script') {
+        const row = e.target.closest('.script');
+        if (row) {
+            const r = row.getBoundingClientRect();
+            return { type: 'script-row', el: row, after: e.clientY > r.top + r.height / 2 };
+        }
+        const groupSum = e.target.closest('details.group');
+        if (groupSum) return { type: 'group', el: groupSum };
+        const folderSum = e.target.closest('details:not(.group)');
+        if (folderSum) return { type: 'dir', el: folderSum };
+        return { type: 'ungroup', el: null };
+    }
+    if (dragKind === 'folder') {
+        const fd = e.target.closest('details:not(.group)');
+        if (fd && fd.dataset.path !== dragPath) {
+            const r = fd.querySelector(':scope > summary').getBoundingClientRect();
+            return { type: 'folder', el: fd, after: e.clientY > r.top + r.height / 2 };
+        }
+        return null;
+    }
+    return null;
+}
+function showIndicator(info) {
+    clearIndicator();
+    if (info.type === 'script-row') {
+        info.el.classList.add(info.after ? 'drop-after' : 'drop-before');
+    } else if (info.type === 'group' || info.type === 'dir') {
+        info.el.querySelector(':scope > summary').classList.add('drop-into');
+    } else if (info.type === 'folder') {
+        info.el.querySelector(':scope > summary').classList.add(info.after ? 'drop-after' : 'drop-before');
+    }
+}
+function post(type, extra) {
+    vscode.postMessage(Object.assign({ type }, extra));
+}
+function sendDrop(info) {
+    if (dragKind === 'script') {
+        if (info.type === 'script-row') {
+            const row = info.el;
+            let beforeId;
+            if (!info.after) beforeId = row.dataset.id;
+            else {
+                const n = nextSibling(row, (x) => x.classList.contains('script'));
+                beforeId = n ? n.dataset.id : undefined;
+            }
+            const target = row.dataset.group
+                ? { kind: 'group', name: row.dataset.group, beforeId }
+                : { kind: 'dir', dir: row.dataset.dir, beforeId };
+            post('dropScripts', { ids: dragIds, target });
+        } else if (info.type === 'group') {
+            post('dropScripts', { ids: dragIds, target: { kind: 'group', name: info.el.dataset.group } });
+        } else if (info.type === 'dir') {
+            post('dropScripts', { ids: dragIds, target: { kind: 'dir', dir: info.el.dataset.path } });
+        } else if (info.type === 'ungroup') {
+            post('dropScripts', { ids: dragIds, target: { kind: 'ungroup' } });
+        }
+    } else if (dragKind === 'folder' && info.type === 'folder') {
+        const fd = info.el;
+        let beforePath;
+        if (!info.after) beforePath = fd.dataset.path;
+        else {
+            const n = nextSibling(fd, (x) => x.tagName === 'DETAILS' && !x.classList.contains('group'));
+            beforePath = n ? n.dataset.path : undefined;
+        }
+        post('dropFolders', { paths: [dragPath], beforePath });
+    }
+}
+treeEl.addEventListener('dragover', (e) => {
+    const info = dropInfo(e);
+    if (!info) {
+        clearIndicator();
+        return;
+    }
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    showIndicator(info);
+});
+treeEl.addEventListener('drop', (e) => {
+    const info = dropInfo(e);
+    clearIndicator();
+    if (!info) return;
+    e.preventDefault();
+    sendDrop(info);
+});
+treeEl.addEventListener('dragleave', (e) => {
+    if (e.target === treeEl) clearIndicator();
+});
 
 window.addEventListener('message', (e) => {
     if (e.data.type === 'data') {
@@ -341,6 +435,18 @@ function actionBtn(svg, title, type, id) {
 function scriptNode(s) {
     const row = el('div', 'script');
     row.dataset.id = s.id;
+    row.dataset.dir = s.dir;
+    row.dataset.group = s.group || '';
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        dragKind = 'script';
+        dragIds = selected.size && selected.has(s.id) ? [...selected] : [s.id];
+        dragPath = null;
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', s.id);
+    });
+    row.addEventListener('dragend', endDrag);
     row.dataset.search = (s.name + ' ' + (s.location || '') + ' ' + (s.comment || '') + ' ' + s.command).toLowerCase();
     row.dataset.vscodeContext = JSON.stringify({ webviewSection: 'srScript', scriptId: s.id, preventDefaultContextMenuItems: true });
     row.title = s.command;
@@ -380,7 +486,20 @@ function scriptNode(s) {
 function folderNode(f, open) {
     if (!f.folders.length && !f.scripts.length) return null;
     const details = el('details');
+    details.dataset.path = f.path;
     details.open = open;
+    // Drag the whole <details> (Chromium won't reliably start a drag from a <summary>).
+    // Nested script rows / sub-folders stopPropagation so the innermost element wins.
+    details.draggable = true;
+    details.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        dragKind = 'folder';
+        dragPath = f.path;
+        dragIds = [];
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', f.path);
+    });
+    details.addEventListener('dragend', endDrag);
     const summary = el('summary');
     summary.appendChild(iconEl(ICONS.folder));
     summary.appendChild(el('span', 'label', f.label));
@@ -402,6 +521,7 @@ function renderTree(data) {
     for (const g of data.groups) {
         any = true;
         const details = el('details', 'group');
+        details.dataset.group = g.name;
         details.open = true;
         const summary = el('summary');
         summary.appendChild(iconEl(ICONS.group));

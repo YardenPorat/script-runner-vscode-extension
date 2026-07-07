@@ -12,8 +12,9 @@ async function pickScript(provider: ScriptTreeProvider, placeHolder: string): Pr
     }
     const picked = await vscode.window.showQuickPick(
         scripts.map((s) => ({
-            label: `$(terminal) ${s.name}`,
-            description: [s.pkgRelDir || '(root)', s.group].filter(Boolean).join(' · '),
+            // Path in the label so a combined query like "apps/web build" matches path+name together.
+            label: `$(terminal) ${s.pkgRelDir ? `${s.pkgRelDir}/` : ''}${s.name}`,
+            description: s.group,
             detail: [s.comment, s.command].filter(Boolean).join(' — '),
             script: s,
         })),
