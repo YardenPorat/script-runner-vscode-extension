@@ -4,7 +4,10 @@ import * as path from "path";
 export interface ScriptInfo {
   /** Stable id: `<pkgRelDir>#<scriptName>` */
   id: string;
+  /** Actual script name in package.json (used to run it) */
   name: string;
+  /** User-facing rename override; does not change package.json */
+  displayName?: string;
   command: string;
   /** Workspace-relative directory of the package ('' for root) */
   pkgRelDir: string;
@@ -22,6 +25,8 @@ export interface ScriptEntry {
   group?: string;
   comment?: string;
   order?: number;
+  /** Display name override; does not change package.json */
+  displayName?: string;
 }
 
 export interface RunnerConfig {
@@ -98,7 +103,10 @@ export class ConfigStore {
       if (typeof entry.order === "number") {
         e.order = entry.order;
       }
-      if (e.group || e.comment || typeof e.order === "number") {
+      if (entry.displayName) {
+        e.displayName = entry.displayName;
+      }
+      if (e.group || e.comment || typeof e.order === "number" || e.displayName) {
         clean.scripts[key] = e;
       }
     }
@@ -160,6 +168,7 @@ export async function scanScripts(store: ConfigStore): Promise<ScriptInfo[]> {
       scripts.push({
         id,
         name,
+        displayName: entry?.displayName,
         command,
         pkgRelDir,
         pkgDir,

@@ -5,7 +5,11 @@
       "comment": "sdfsdfsdfsdf"
     },
     "#package": {
-      "comment": "test comment"
+      "comment": "test comment",
+      "order": 1
+    },
+    "#watch": {
+      "order": 0
     }
   }
 }

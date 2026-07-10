@@ -7,6 +7,8 @@ import { buildFolderTree, dropFolders, dropScripts, OrderedFolder, ScriptDropTar
 interface PanelScript {
     id: string;
     name: string;
+    /** Rename override; label shows this, real name kept for running */
+    displayName?: string;
     command: string;
     comment?: string;
     location?: string;
@@ -39,6 +41,7 @@ function toPanelScript(s: ScriptInfo, showLocation: boolean): PanelScript {
     return {
         id: s.id,
         name: s.name,
+        displayName: s.displayName,
         command: s.command,
         comment: s.comment,
         location: showLocation ? s.pkgRelDir || '(root)' : undefined,
@@ -89,6 +92,7 @@ async function buildData(provider: ScriptTreeProvider, store: ConfigStore): Prom
 export interface PanelHandlers {
     assignGroup(scripts: ScriptInfo[]): Promise<void>;
     editComment(script: ScriptInfo): Promise<void>;
+    renameScript(script: ScriptInfo): Promise<void>;
 }
 
 export class ScriptPanel {
@@ -144,6 +148,8 @@ export class ScriptPanel {
                     }
                 } else if (msg.type === 'editComment' && script) {
                     void this.handlers.editComment(script);
+                } else if (msg.type === 'renameScript' && script) {
+                    void this.handlers.renameScript(script);
                 } else if (msg.type === 'dropScripts' && msg.ids?.length && msg.target) {
                     void dropScripts(this.store, all, msg.ids, msg.target).then(() => this.provider.refresh());
                 } else if (msg.type === 'dropFolders' && msg.paths?.length) {
@@ -198,8 +204,13 @@ export class ScriptPanel {
     .folder-icon { color: var(--vscode-charts-blue, var(--vscode-foreground)); }
     .group-icon { color: var(--vscode-charts-yellow); }
     .script-icon { color: var(--vscode-terminal-ansiGreen, var(--vscode-foreground)); }
-    .script { display: flex; align-items: center; gap: 6px; padding: 3px 4px 3px 20px; border-radius: 3px; cursor: pointer; }
+    .script { display: flex; align-items: center; gap: 6px; padding: 3px 4px 3px 20px; border-radius: 3px; cursor: default; }
     .script:hover { background: var(--vscode-list-hoverBackground); }
+    .runslot { position: relative; width: 16px; height: 16px; flex: 0 0 auto; }
+    .runslot .script-icon { position: absolute; inset: 0; }
+    .runbtn { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; background: transparent; border: none; padding: 0; cursor: pointer; color: var(--vscode-terminal-ansiGreen, var(--vscode-foreground)); }
+    .script:hover .runslot .script-icon { display: none; }
+    .script:hover .runbtn { display: flex; }
     .script.selected { background: var(--vscode-list-activeSelectionBackground); color: var(--vscode-list-activeSelectionForeground); }
     #selbar { position: sticky; top: 41px; display: flex; align-items: center; gap: 8px; padding: 6px 8px; background: var(--vscode-editorWidget-background, var(--vscode-editor-background)); border-bottom: 1px solid var(--vscode-panel-border); z-index: 1; }
     #selbar button { background: var(--vscode-button-background); color: var(--vscode-button-foreground); }
@@ -404,8 +415,10 @@ const ICONS = {
     folder: '<svg class="icon folder-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M14.5 3H7.7L6.6 1.9 6.3 1.8H1.5l-.5.5v11l.5.5h13l.5-.5v-9zM14 13H2V3h4l1.1 1.1.4.2H14z"/></svg>',
     group: '<svg class="icon group-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M2 2h5l1 1.5h6V13H2zm1 1v9h9V4.5H7.5L6.5 3z"/></svg>',
     script: '<svg class="icon script-icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M1.5 2h13l.5.5v11l-.5.5h-13l-.5-.5v-11zM2 3v10h12V3zm1.6 2.1.7-.7L7 7.1v.8L4.3 10.6l-.7-.7L5.9 7.5zM8 9.5h4v1H8z"/></svg>',
+    play: '<svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 2.5v11l9-5.5z"/></svg>',
     tag: '<svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M8 1H2v6l7 7 6-6zm-3 4a1 1 0 110-2 1 1 0 010 2z"/></svg>',
     comment: '<svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M14 2H2L1 3v8l1 1h2v3l3-3h7l1-1V3zm-1 8H6.5L5 11.5V10H2V3h11z"/></svg>',
+    rename: '<svg class="icon" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M13.2 1.8 14.2 2.8a1 1 0 010 1.4L5.4 13H2v-3.4l8.8-8.8a1 1 0 011.4 0zM3 12h1.6l6.7-6.7-1.6-1.6L3 10.4zm8.7-7.7 1-1-1-1-1 1z"/></svg>',
 };
 
 function el(tag, cls, text) {
@@ -447,15 +460,29 @@ function scriptNode(s) {
         e.dataTransfer.setData('text/plain', s.id);
     });
     row.addEventListener('dragend', endDrag);
-    row.dataset.search = (s.name + ' ' + (s.location || '') + ' ' + (s.comment || '') + ' ' + s.command).toLowerCase();
+    row.dataset.search = (s.name + ' ' + (s.displayName || '') + ' ' + (s.location || '') + ' ' + (s.comment || '') + ' ' + s.command).toLowerCase();
     row.dataset.vscodeContext = JSON.stringify({ webviewSection: 'srScript', scriptId: s.id, preventDefaultContextMenuItems: true });
     row.title = s.command;
-    row.appendChild(iconEl(ICONS.script));
-    row.appendChild(el('span', 'name', s.name));
+    // Left slot: script icon by default, swaps to a clickable play button on hover.
+    const runSlot = el('span', 'runslot');
+    runSlot.appendChild(iconEl(ICONS.script));
+    const runBtn = el('button', 'runbtn');
+    runBtn.title = 'Run';
+    runBtn.appendChild(iconEl(ICONS.play));
+    runBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        vscode.postMessage({ type: 'run', id: s.id });
+    });
+    runSlot.appendChild(runBtn);
+    row.appendChild(runSlot);
+    row.appendChild(el('span', 'name', s.displayName || s.name));
     row.appendChild(el('span', 'cmd', s.command));
-    const metaBits = [s.location, s.comment].filter(Boolean).join(' — ');
+    // When renamed, keep the real script name visible alongside location/comment.
+    const renamed = s.displayName ? s.name : undefined;
+    const metaBits = [s.location, renamed, s.comment].filter(Boolean).join(' — ');
     if (metaBits) row.appendChild(el('span', 'meta', metaBits));
     const actions = el('div', 'actions');
+    actions.appendChild(actionBtn(ICONS.rename, 'Rename…', 'renameScript', s.id));
     actions.appendChild(actionBtn(ICONS.tag, 'Assign group…', 'assignGroup', s.id));
     actions.appendChild(actionBtn(ICONS.comment, 'Edit comment…', 'editComment', s.id));
     row.appendChild(actions);
@@ -476,8 +503,8 @@ function scriptNode(s) {
             lastIndex = idx;
             updateSelUI();
         } else {
+            // Plain click no longer runs; use the hover play button. Just clear any selection.
             if (selected.size) clearSel();
-            vscode.postMessage({ type: 'run', id: s.id });
         }
     });
     return row;

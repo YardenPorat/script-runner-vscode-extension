@@ -2,7 +2,7 @@
   "name": "monorepo-script-runner",
   "displayName": "Monorepo Script Runner",
   "description": "Discover, group, annotate and run package.json scripts across a monorepo. Config persists to a committable JSON file.",
-  "version": "0.9.2",
+  "version": "0.12.0",
   "publisher": "yarden-porat",
   "author": "Yarden Porat",
   "license": "MIT",
@@ -65,6 +65,12 @@
         "title": "Edit Comment…",
         "category": "Script Runner",
         "icon": "$(comment)"
+      },
+      {
+        "command": "scriptRunner.renameScript",
+        "title": "Rename Script…",
+        "category": "Script Runner",
+        "icon": "$(edit)"
       },
       {
         "command": "scriptRunner.openConfig",
@@ -137,19 +143,24 @@
           "group": "inline@1"
         },
         {
-          "command": "scriptRunner.assignGroup",
+          "command": "scriptRunner.renameScript",
           "when": "view == scriptRunner.scripts && viewItem == script",
           "group": "1_edit@1"
         },
         {
-          "command": "scriptRunner.editComment",
+          "command": "scriptRunner.assignGroup",
           "when": "view == scriptRunner.scripts && viewItem == script",
           "group": "1_edit@2"
         },
         {
-          "command": "scriptRunner.removeFromGroup",
+          "command": "scriptRunner.editComment",
           "when": "view == scriptRunner.scripts && viewItem == script",
           "group": "1_edit@3"
+        },
+        {
+          "command": "scriptRunner.removeFromGroup",
+          "when": "view == scriptRunner.scripts && viewItem == script",
+          "group": "1_edit@4"
         },
         {
           "command": "scriptRunner.copyCommand",
@@ -173,6 +184,11 @@
         }
       ],
       "webview/context": [
+        {
+          "command": "scriptRunner.renameScript",
+          "when": "webviewSection == 'srScript'",
+          "group": "0_edit@1"
+        },
         {
           "command": "scriptRunner.copyCommand",
           "when": "webviewSection == 'srScript'",

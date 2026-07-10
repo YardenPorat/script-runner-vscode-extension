@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo } from './model';
-import { ScriptTreeProvider, ScriptItem, GroupItem } from './tree';
+import { ScriptTreeProvider, ScriptItem, GroupItem, FolderItem } from './tree';
 import { runScript, disposeTerminals, onTerminalClosed } from './runner';
 import { ScriptPanel } from './panel';
 
@@ -13,8 +13,8 @@ async function pickScript(provider: ScriptTreeProvider, placeHolder: string): Pr
     const picked = await vscode.window.showQuickPick(
         scripts.map((s) => ({
             // Path in the label so a combined query like "apps/web build" matches path+name together.
-            label: `$(terminal) ${s.pkgRelDir ? `${s.pkgRelDir}/` : ''}${s.name}`,
-            description: s.group,
+            label: `$(terminal) ${s.pkgRelDir ? `${s.pkgRelDir}/` : ''}${s.displayName || s.name}`,
+            description: [s.displayName ? s.name : undefined, s.group].filter(Boolean).join(' · '),
             detail: [s.comment, s.command].filter(Boolean).join(' — '),
             script: s,
         })),
@@ -105,17 +105,43 @@ async function editCommentFor(store: ConfigStore, provider: ScriptTreeProvider, 
     provider.refresh();
 }
 
+async function renameScriptFor(store: ConfigStore, provider: ScriptTreeProvider, script: ScriptInfo): Promise<void> {
+    const name = await vscode.window.showInputBox({
+        prompt: `Display name for "${script.name}" (empty to reset to the real name)`,
+        value: script.displayName ?? '',
+    });
+    if (name === undefined) {
+        return;
+    }
+    const trimmed = name.trim();
+    // Storing the real name adds no value; treat it as a reset.
+    const displayName = trimmed && trimmed !== script.name ? trimmed : undefined;
+    await store.update(script.id, { displayName });
+    provider.refresh();
+}
+
 export function activate(context: vscode.ExtensionContext): void {
     const store = new ConfigStore();
-    const provider = new ScriptTreeProvider(store);
+    const provider = new ScriptTreeProvider(store, context.workspaceState);
+
+    const treeView = vscode.window.createTreeView('scriptRunner.scripts', {
+        treeDataProvider: provider,
+        dragAndDropController: provider,
+        canSelectMany: true,
+        showCollapseAll: true,
+    });
+    const persistCollapse = (element: unknown, collapsed: boolean) => {
+        if (element instanceof FolderItem) {
+            provider.setCollapsed('folder', element.path, collapsed);
+        } else if (element instanceof GroupItem) {
+            provider.setCollapsed('group', element.groupName, collapsed);
+        }
+    };
 
     context.subscriptions.push(
-        vscode.window.createTreeView('scriptRunner.scripts', {
-            treeDataProvider: provider,
-            dragAndDropController: provider,
-            canSelectMany: true,
-            showCollapseAll: true,
-        }),
+        treeView,
+        treeView.onDidExpandElement((e) => persistCollapse(e.element, false)),
+        treeView.onDidCollapseElement((e) => persistCollapse(e.element, true)),
 
         vscode.commands.registerCommand('scriptRunner.refresh', () => provider.refresh()),
 
@@ -123,6 +149,7 @@ export function activate(context: vscode.ExtensionContext): void {
             ScriptPanel.createOrShow(context, provider, store, {
                 assignGroup: (scripts) => assignGroupTo(store, provider, scripts),
                 editComment: (script) => editCommentFor(store, provider, script),
+                renameScript: (script) => renameScriptFor(store, provider, script),
             });
         }),
 
@@ -149,6 +176,13 @@ export function activate(context: vscode.ExtensionContext): void {
             const script = await resolveScript(provider, item, 'Select a script to annotate');
             if (script) {
                 await editCommentFor(store, provider, script);
+            }
+        }),
+
+        vscode.commands.registerCommand('scriptRunner.renameScript', async (item?: unknown) => {
+            const script = await resolveScript(provider, item, 'Select a script to rename');
+            if (script) {
+                await renameScriptFor(store, provider, script);
             }
         }),
 

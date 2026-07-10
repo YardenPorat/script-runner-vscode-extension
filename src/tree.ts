@@ -2,9 +2,13 @@ import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo, scanScripts } from './model';
 import { buildFolderTree, dropFolders, dropScripts, OrderedFolder, sortScripts, ScriptDropTarget } from './order';
 
+const collapseState = (collapsed: boolean): vscode.TreeItemCollapsibleState =>
+    collapsed ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded;
+
 export class GroupItem extends vscode.TreeItem {
-    constructor(public readonly groupName: string, count: number) {
-        super(groupName, vscode.TreeItemCollapsibleState.Expanded);
+    constructor(public readonly groupName: string, count: number, collapsed = false) {
+        super(groupName, collapseState(collapsed));
+        this.id = `group:${groupName}`;
         this.contextValue = 'group';
         this.description = `${count}`;
         this.iconPath = new vscode.ThemeIcon('symbol-class', new vscode.ThemeColor('charts.yellow'));
@@ -17,8 +21,10 @@ export class FolderItem extends vscode.TreeItem {
         public readonly path: string,
         count: number,
         public readonly children: Array<FolderItem | ScriptItem>,
+        collapsed = false,
     ) {
-        super(label, vscode.TreeItemCollapsibleState.Expanded);
+        super(label, collapseState(collapsed));
+        this.id = `folder:${path}`;
         this.contextValue = 'folder';
         this.description = `${count}`;
         this.iconPath = vscode.ThemeIcon.Folder;
@@ -27,11 +33,13 @@ export class FolderItem extends vscode.TreeItem {
 
 export class ScriptItem extends vscode.TreeItem {
     constructor(public readonly script: ScriptInfo, showLocation: boolean) {
-        super(script.name, vscode.TreeItemCollapsibleState.None);
+        super(script.displayName || script.name, vscode.TreeItemCollapsibleState.None);
         this.contextValue = 'script';
         this.iconPath = new vscode.ThemeIcon('terminal');
         const location = showLocation ? script.pkgRelDir || '(root)' : undefined;
-        this.description = [location, script.comment].filter(Boolean).join(' — ');
+        // When renamed, surface the real script name so the mapping stays visible.
+        const renamed = script.displayName ? script.name : undefined;
+        this.description = [location, renamed, script.comment].filter(Boolean).join(' — ');
         this.tooltip = new vscode.MarkdownString(
             [
                 `**${script.packageName}** \`${script.name}\``,
@@ -42,24 +50,23 @@ export class ScriptItem extends vscode.TreeItem {
                 script.comment ? `\n> ${script.comment}` : '',
             ].join('\n'),
         );
-        this.command = {
-            command: 'scriptRunner.run',
-            title: 'Run Script',
-            arguments: [this],
-        };
+        // No run-on-click: run via the inline play action that appears on hover.
     }
 }
 
 type TreeNode = GroupItem | FolderItem | ScriptItem;
 
-function toTreeItems(folder: OrderedFolder, isRoot = false): Array<FolderItem | ScriptItem> {
-    const folders = folder.folders.map((f) => new FolderItem(f.label, f.path, f.count, toTreeItems(f)));
+function toTreeItems(folder: OrderedFolder, collapsedFolders: Set<string>, isRoot = false): Array<FolderItem | ScriptItem> {
+    const folders = folder.folders.map(
+        (f) => new FolderItem(f.label, f.path, f.count, toTreeItems(f, collapsedFolders), collapsedFolders.has(f.path)),
+    );
     const leaves = folder.scripts.map((s) => new ScriptItem(s, false));
     // Root-level scripts (workspace root package.json) sort before folders.
     return isRoot ? [...leaves, ...folders] : [...folders, ...leaves];
 }
 
 const SCRIPT_MIME = 'application/vnd.code.tree.scriptrunner.scripts';
+const COLLAPSED_KEY = 'scriptRunner.collapsed';
 
 interface DragPayload {
     scriptIds: string[];
@@ -76,7 +83,27 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
     private scripts: ScriptInfo[] = [];
     private loaded = false;
 
-    constructor(private readonly store: ConfigStore) {}
+    constructor(
+        private readonly store: ConfigStore,
+        private readonly memento: vscode.Memento,
+    ) {}
+
+    private collapsed(): { folders: string[]; groups: string[] } {
+        return this.memento.get(COLLAPSED_KEY, { folders: [], groups: [] });
+    }
+
+    /** Persist a folder/group collapse toggle to workspace state (machine-local, never committed). */
+    setCollapsed(kind: 'folder' | 'group', key: string, collapsed: boolean): void {
+        const state = this.collapsed();
+        const set = new Set(kind === 'folder' ? state.folders : state.groups);
+        if (collapsed) {
+            set.add(key);
+        } else {
+            set.delete(key);
+        }
+        const next = kind === 'folder' ? { ...state, folders: [...set] } : { ...state, groups: [...set] };
+        void this.memento.update(COLLAPSED_KEY, next);
+    }
 
     refresh(): void {
         this.loaded = false;
@@ -108,10 +135,15 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
                 ...(config.groups ?? []).filter((g) => grouped.has(g)),
                 ...[...grouped.keys()].filter((g) => !config.groups?.includes(g)).sort(),
             ];
-            const groupItems = orderedGroups.map((g) => new GroupItem(g, grouped.get(g)?.length ?? 0));
+            const collapsed = this.collapsed();
+            const collapsedGroups = new Set(collapsed.groups);
+            const collapsedFolders = new Set(collapsed.folders);
+            const groupItems = orderedGroups.map(
+                (g) => new GroupItem(g, grouped.get(g)?.length ?? 0, collapsedGroups.has(g)),
+            );
 
             const tree = buildFolderTree(ungrouped, config.folders ?? {});
-            return [...groupItems, ...toTreeItems(tree, true)];
+            return [...groupItems, ...toTreeItems(tree, collapsedFolders, true)];
         }
         if (element instanceof GroupItem) {
             const members = this.scripts.filter((s) => s.group === element.groupName);
