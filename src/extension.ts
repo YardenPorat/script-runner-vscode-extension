@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo } from './model';
 import { ScriptTreeProvider, ScriptItem, GroupItem, FolderItem } from './tree';
-import { runScript, disposeTerminals, onTerminalClosed } from './runner';
+import { runScript, disposeTerminals, onTerminalClosed, registerTerminalTracking } from './runner';
 import { ScriptPanel } from './panel';
 
 async function pickScript(provider: ScriptTreeProvider, placeHolder: string): Promise<ScriptInfo | undefined> {
@@ -108,7 +108,7 @@ async function editCommentFor(store: ConfigStore, provider: ScriptTreeProvider, 
 async function renameScriptFor(store: ConfigStore, provider: ScriptTreeProvider, script: ScriptInfo): Promise<void> {
     const name = await vscode.window.showInputBox({
         prompt: `Display name for "${script.name}" (empty to reset to the real name)`,
-        value: script.displayName ?? '',
+        value: script.displayName ?? script.name,
     });
     if (name === undefined) {
         return;
@@ -124,11 +124,26 @@ export function activate(context: vscode.ExtensionContext): void {
     const store = new ConfigStore();
     const provider = new ScriptTreeProvider(store, context.workspaceState);
 
+    const panelHandlers = {
+        assignGroup: (scripts: ScriptInfo[]) => assignGroupTo(store, provider, scripts),
+        editComment: (script: ScriptInfo) => editCommentFor(store, provider, script),
+        renameScript: (script: ScriptInfo) => renameScriptFor(store, provider, script),
+    };
+
     const treeView = vscode.window.createTreeView('scriptRunner.scripts', {
         treeDataProvider: provider,
         dragAndDropController: provider,
         canSelectMany: true,
         showCollapseAll: true,
+    });
+
+    // Re-adopt the editor panel VS Code restores after an extension update/restart.
+    vscode.window.registerWebviewPanelSerializer('scriptRunner.panel', {
+        deserializeWebviewPanel(panel: vscode.WebviewPanel) {
+            panel.webview.options = { enableScripts: true };
+            ScriptPanel.revive(panel, provider, store, panelHandlers);
+            return Promise.resolve();
+        },
     });
     const persistCollapse = (element: unknown, collapsed: boolean) => {
         if (element instanceof FolderItem) {
@@ -146,11 +161,7 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.commands.registerCommand('scriptRunner.refresh', () => provider.refresh()),
 
         vscode.commands.registerCommand('scriptRunner.openInEditor', () => {
-            ScriptPanel.createOrShow(context, provider, store, {
-                assignGroup: (scripts) => assignGroupTo(store, provider, scripts),
-                editComment: (script) => editCommentFor(store, provider, script),
-                renameScript: (script) => renameScriptFor(store, provider, script),
-            });
+            ScriptPanel.createOrShow(context, provider, store, panelHandlers);
         }),
 
         vscode.commands.registerCommand('scriptRunner.search', async () => {
@@ -265,6 +276,7 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
 
         vscode.window.onDidCloseTerminal(onTerminalClosed),
+        registerTerminalTracking(),
     );
 
     // Refresh on package.json or config changes.

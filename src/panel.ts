@@ -119,6 +119,17 @@ export class ScriptPanel {
         ScriptPanel.instance = new ScriptPanel(panel, provider, store, handlers);
     }
 
+    // Re-adopt a webview panel restored by VS Code after an extension restart/update.
+    static revive(
+        panel: vscode.WebviewPanel,
+        provider: ScriptTreeProvider,
+        store: ConfigStore,
+        handlers: PanelHandlers,
+    ): void {
+        panel.iconPath = new vscode.ThemeIcon('run-all');
+        ScriptPanel.instance = new ScriptPanel(panel, provider, store, handlers);
+    }
+
     private readonly disposables: vscode.Disposable[] = [];
 
     private constructor(
