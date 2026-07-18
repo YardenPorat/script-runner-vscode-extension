@@ -1,15 +1,29 @@
 {
   "scripts": {
     "#compile": {
-      "group": "Starred",
-      "comment": "sdfsdfsdfsdf"
+      "group": "starred",
+      "order": 1
+    },
+    "#install-latest": {
+      "order": 0
     },
     "#package": {
-      "comment": "test comment",
       "order": 1
     },
     "#watch": {
+      "order": 4
+    },
+    "example/app-example-2#example2": {
+      "group": "starred",
       "order": 0
     }
+  },
+  "groups": {
+    "starred": 3
+  },
+  "folders": {
+    "example": 4,
+    "example/app-example-2": 0,
+    "example/app-example-1": 2
   }
 }

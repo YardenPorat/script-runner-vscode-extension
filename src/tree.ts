@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo, scanScripts } from './model';
-import { buildFolderTree, dropFolders, dropScripts, OrderedFolder, sortScripts, ScriptDropTarget } from './order';
+import { buildRoot, dropFolders, dropScripts, dropTreeNodes, OrderedFolder, sortScripts } from './order';
 
 const collapseState = (collapsed: boolean): vscode.TreeItemCollapsibleState =>
     collapsed ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded;
@@ -56,13 +56,13 @@ export class ScriptItem extends vscode.TreeItem {
 
 type TreeNode = GroupItem | FolderItem | ScriptItem;
 
-function toTreeItems(folder: OrderedFolder, collapsedFolders: Set<string>, isRoot = false): Array<FolderItem | ScriptItem> {
-    const folders = folder.folders.map(
-        (f) => new FolderItem(f.label, f.path, f.count, toTreeItems(f, collapsedFolders), collapsedFolders.has(f.path)),
+function toTreeItems(folder: OrderedFolder, collapsedFolders: Set<string>): Array<FolderItem | ScriptItem> {
+    // Children arrive interleaved in display order (folders and scripts share one index space).
+    return folder.children.map((c) =>
+        c.kind === 'folder'
+            ? new FolderItem(c.folder.label, c.folder.path, c.folder.count, toTreeItems(c.folder, collapsedFolders), collapsedFolders.has(c.folder.path))
+            : new ScriptItem(c.script, false),
     );
-    const leaves = folder.scripts.map((s) => new ScriptItem(s, false));
-    // Root-level scripts (workspace root package.json) sort before folders.
-    return isRoot ? [...leaves, ...folders] : [...folders, ...leaves];
 }
 
 const SCRIPT_MIME = 'application/vnd.code.tree.scriptrunner.scripts';
@@ -71,6 +71,7 @@ const COLLAPSED_KEY = 'scriptRunner.collapsed';
 interface DragPayload {
     scriptIds: string[];
     folderPaths: string[];
+    groupNames: string[];
 }
 
 export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vscode.TreeDragAndDropController<TreeNode> {
@@ -90,6 +91,11 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
 
     private collapsed(): { folders: string[]; groups: string[] } {
         return this.memento.get(COLLAPSED_KEY, { folders: [], groups: [] });
+    }
+
+    getCollapsedState(): { folders: Set<string>; groups: Set<string> } {
+        const state = this.collapsed();
+        return { folders: new Set(state.folders), groups: new Set(state.groups) };
     }
 
     /** Persist a folder/group collapse toggle to workspace state (machine-local, never committed). */
@@ -118,32 +124,25 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
         if (!element) {
             await this.ensureScripts();
             const config = await this.store.load();
-
-            const grouped = new Map<string, ScriptInfo[]>();
-            const ungrouped: ScriptInfo[] = [];
-            for (const script of this.scripts) {
-                if (script.group) {
-                    const list = grouped.get(script.group) ?? [];
-                    list.push(script);
-                    grouped.set(script.group, list);
-                } else {
-                    ungrouped.push(script);
-                }
-            }
-
-            const orderedGroups = [
-                ...(config.groups ?? []).filter((g) => grouped.has(g)),
-                ...[...grouped.keys()].filter((g) => !config.groups?.includes(g)).sort(),
-            ];
             const collapsed = this.collapsed();
             const collapsedGroups = new Set(collapsed.groups);
             const collapsedFolders = new Set(collapsed.folders);
-            const groupItems = orderedGroups.map(
-                (g) => new GroupItem(g, grouped.get(g)?.length ?? 0, collapsedGroups.has(g)),
-            );
-
-            const tree = buildFolderTree(ungrouped, config.folders ?? {});
-            return [...groupItems, ...toTreeItems(tree, collapsedFolders, true)];
+            // Groups, folders and scripts interleaved in one persisted root order.
+            return buildRoot(this.scripts, config).map((c) => {
+                if (c.kind === 'group') {
+                    return new GroupItem(c.name, c.scripts.length, collapsedGroups.has(c.name));
+                }
+                if (c.kind === 'folder') {
+                    return new FolderItem(
+                        c.folder.label,
+                        c.folder.path,
+                        c.folder.count,
+                        toTreeItems(c.folder, collapsedFolders),
+                        collapsedFolders.has(c.folder.path),
+                    );
+                }
+                return new ScriptItem(c.script, false);
+            });
         }
         if (element instanceof GroupItem) {
             const members = this.scripts.filter((s) => s.group === element.groupName);
@@ -159,8 +158,9 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
         const payload: DragPayload = {
             scriptIds: source.filter((n): n is ScriptItem => n instanceof ScriptItem).map((n) => n.script.id),
             folderPaths: source.filter((n): n is FolderItem => n instanceof FolderItem).map((n) => n.path),
+            groupNames: source.filter((n): n is GroupItem => n instanceof GroupItem).map((n) => n.groupName),
         };
-        if (payload.scriptIds.length || payload.folderPaths.length) {
+        if (payload.scriptIds.length || payload.folderPaths.length || payload.groupNames.length) {
             dataTransfer.set(SCRIPT_MIME, new vscode.DataTransferItem(JSON.stringify(payload)));
         }
     }
@@ -177,10 +177,52 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
             return;
         }
 
-        // Dragging folders only reorders them among their siblings (drop onto a sibling folder).
+        // Dragging groups reorders them at the root (drop onto any root sibling —
+        // group, folder or script — to slot in before it; empty space appends).
+        if (payload.groupNames?.length) {
+            let before: string | undefined;
+            if (target instanceof GroupItem) {
+                before = `g:${target.groupName}`;
+            } else if (target instanceof FolderItem) {
+                before = `f:${target.path}`;
+            } else if (target instanceof ScriptItem && !target.script.group) {
+                before = `s:${target.script.id}`;
+            }
+            await dropTreeNodes(
+                this.store,
+                this.scripts,
+                payload.groupNames.map((g) => `g:${g}`),
+                '',
+                before,
+            );
+            this.refresh();
+            return;
+        }
+
+        // Dragging folders reorders them among their siblings (drop onto a sibling
+        // folder, onto a group header to slot in before it at the root, or onto a
+        // script row in the same parent to slot in before it).
         if (payload.folderPaths?.length) {
-            if (target instanceof FolderItem) {
+            if (target instanceof GroupItem) {
+                await dropTreeNodes(
+                    this.store,
+                    this.scripts,
+                    payload.folderPaths.map((p) => `f:${p}`),
+                    '',
+                    `g:${target.groupName}`,
+                );
+                this.refresh();
+            } else if (target instanceof FolderItem) {
                 await dropFolders(this.store, this.scripts, payload.folderPaths, target.path);
+                this.refresh();
+            } else if (target instanceof ScriptItem && !target.script.group) {
+                await dropTreeNodes(
+                    this.store,
+                    this.scripts,
+                    payload.folderPaths.map((p) => `f:${p}`),
+                    target.script.pkgRelDir,
+                    `s:${target.script.id}`,
+                );
                 this.refresh();
             }
             return;
@@ -191,20 +233,28 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
             return;
         }
 
-        // Group header → join group (append). Script → reorder before it within its container.
+        // Group header → join group (append). Grouped script → reorder within its group.
+        // Ungrouped script → reorder in the folder tree (may interleave with folders).
         // Folder / empty space → remove from group (back to the folder tree).
-        let dropTarget: ScriptDropTarget;
         if (target instanceof GroupItem) {
-            dropTarget = { kind: 'group', name: target.groupName };
+            await dropScripts(this.store, this.scripts, ids, { kind: 'group', name: target.groupName });
+        } else if (target instanceof ScriptItem && target.script.group) {
+            await dropScripts(this.store, this.scripts, ids, {
+                kind: 'group',
+                name: target.script.group,
+                beforeId: target.script.id,
+            });
         } else if (target instanceof ScriptItem) {
-            dropTarget = target.script.group
-                ? { kind: 'group', name: target.script.group, beforeId: target.script.id }
-                : { kind: 'dir', dir: target.script.pkgRelDir, beforeId: target.script.id };
+            await dropTreeNodes(
+                this.store,
+                this.scripts,
+                ids.map((id) => `s:${id}`),
+                target.script.pkgRelDir,
+                `s:${target.script.id}`,
+            );
         } else {
-            dropTarget = { kind: 'ungroup' };
+            await dropScripts(this.store, this.scripts, ids, { kind: 'ungroup' });
         }
-
-        await dropScripts(this.store, this.scripts, ids, dropTarget);
         this.refresh();
     }
 

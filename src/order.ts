@@ -1,4 +1,4 @@
-import { ConfigStore, ScriptInfo } from './model';
+import { ConfigStore, RunnerConfig, ScriptInfo } from './model';
 
 const LAST = Number.MAX_SAFE_INTEGER;
 const scriptIdx = (s: ScriptInfo): number => (typeof s.order === 'number' ? s.order : LAST);
@@ -10,15 +10,20 @@ export function sortScripts(scripts: ScriptInfo[]): ScriptInfo[] {
     );
 }
 
+export type DirChild = { kind: 'folder'; folder: OrderedFolder } | { kind: 'script'; script: ScriptInfo };
+
 export interface OrderedFolder {
     /** Display label (may be a compacted chain like `a/b/c`) */
     label: string;
     /** Workspace-relative path of this (compacted) folder node; '' for the root */
     path: string;
     count: number;
-    folders: OrderedFolder[];
-    scripts: ScriptInfo[];
+    /** Subfolders and scripts interleaved in display order (shared index space). */
+    children: DirChild[];
 }
+
+/** Stable sibling key: folders by path, scripts by id. */
+export const childKey = (c: DirChild): string => (c.kind === 'folder' ? `f:${c.folder.path}` : `s:${c.script.id}`);
 
 interface DirNode {
     dirs: Map<string, DirNode>;
@@ -48,25 +53,83 @@ export function buildFolderTree(scripts: ScriptInfo[], folderOrder: Record<strin
     const folderIdx = (p: string): number => (typeof folderOrder[p] === 'number' ? folderOrder[p] : LAST);
 
     const toFolder = (label: string, path: string, node: DirNode): OrderedFolder => {
-        const folders = [...node.dirs.entries()]
-            .map(([name, child]) => {
-                // Compact single-child chains with no scripts of their own: a/b/c
-                let lbl = name;
-                let p = path ? `${path}/${name}` : name;
-                let c = child;
-                while (c.scripts.length === 0 && c.dirs.size === 1) {
-                    const [nextName, nextChild] = c.dirs.entries().next().value as [string, DirNode];
-                    lbl += `/${nextName}`;
-                    p += `/${nextName}`;
-                    c = nextChild;
-                }
-                return toFolder(lbl, p, c);
-            })
-            .sort((a, b) => folderIdx(a.path) - folderIdx(b.path) || a.label.localeCompare(b.label));
-        return { label, path, count: countScripts(node), folders, scripts: sortScripts(node.scripts) };
+        const folders = [...node.dirs.entries()].map(([name, child]) => {
+            // Compact single-child chains with no scripts of their own: a/b/c
+            let lbl = name;
+            let p = path ? `${path}/${name}` : name;
+            let c = child;
+            while (c.scripts.length === 0 && c.dirs.size === 1) {
+                const [nextName, nextChild] = c.dirs.entries().next().value as [string, DirNode];
+                lbl += `/${nextName}`;
+                p += `/${nextName}`;
+                c = nextChild;
+            }
+            return toFolder(lbl, p, c);
+        });
+
+        // Folders and scripts share one index space so they can interleave freely.
+        // Unordered fallback keeps the old defaults: root scripts before folders,
+        // folders before scripts inside a folder; then alphabetical.
+        const isRoot = path === '';
+        const idx = (c: DirChild): number => (c.kind === 'folder' ? folderIdx(c.folder.path) : scriptIdx(c.script));
+        const rank = (c: DirChild): number => ((c.kind === 'script') === isRoot ? 0 : 1);
+        const name = (c: DirChild): string => (c.kind === 'folder' ? c.folder.label : c.script.name);
+        const children: DirChild[] = [
+            ...folders.map((f) => ({ kind: 'folder' as const, folder: f })),
+            ...sortScripts(node.scripts).map((s) => ({ kind: 'script' as const, script: s })),
+        ].sort((a, b) => idx(a) - idx(b) || rank(a) - rank(b) || name(a).localeCompare(name(b)));
+
+        return { label, path, count: countScripts(node), children };
     };
 
     return toFolder('', '', root);
+}
+
+export type RootChild = { kind: 'group'; name: string; scripts: ScriptInfo[] } | DirChild;
+
+/** Stable root key: groups by name, folders by path, scripts by id. */
+export const rootKey = (c: RootChild): string => (c.kind === 'group' ? `g:${c.name}` : childKey(c));
+
+/**
+ * Build the root-level children: groups, folders and scripts interleaved in one
+ * shared index space (groups from `config.groups`, folders/scripts as in the tree).
+ * Unordered fallback keeps the old defaults: groups, then root scripts, then folders.
+ */
+export function buildRoot(all: ScriptInfo[], config: RunnerConfig): RootChild[] {
+    const grouped = new Map<string, ScriptInfo[]>();
+    const ungrouped: ScriptInfo[] = [];
+    for (const s of all) {
+        if (s.group) {
+            const list = grouped.get(s.group) ?? [];
+            list.push(s);
+            grouped.set(s.group, list);
+        } else {
+            ungrouped.push(s);
+        }
+    }
+    const folders = config.folders ?? {};
+    const groupOrder = config.groups ?? {};
+    const tree = buildFolderTree(ungrouped, folders);
+    const children: RootChild[] = [
+        ...[...grouped.entries()].map(([name, scripts]) => ({
+            kind: 'group' as const,
+            name,
+            scripts: sortScripts(scripts),
+        })),
+        ...tree.children,
+    ];
+    const idx = (c: RootChild): number => {
+        if (c.kind === 'group') {
+            return typeof groupOrder[c.name] === 'number' ? groupOrder[c.name] : LAST;
+        }
+        if (c.kind === 'folder') {
+            return typeof folders[c.folder.path] === 'number' ? folders[c.folder.path] : LAST;
+        }
+        return scriptIdx(c.script);
+    };
+    const rank = (c: RootChild): number => (c.kind === 'group' ? 0 : c.kind === 'script' ? 1 : 2);
+    const name = (c: RootChild): string => (c.kind === 'group' ? c.name : c.kind === 'folder' ? c.folder.label : c.script.name);
+    return children.sort((a, b) => idx(a) - idx(b) || rank(a) - rank(b) || name(a).localeCompare(name(b)));
 }
 
 /**
@@ -86,25 +149,113 @@ export function reorderKeys(current: string[], moving: string[], beforeKey?: str
     return [...rest.slice(0, idx), ...moving, ...rest.slice(idx)];
 }
 
+function findNode(root: OrderedFolder, path: string): OrderedFolder | null {
+    if (root.path === path) {
+        return root;
+    }
+    for (const c of root.children) {
+        if (c.kind === 'folder') {
+            const found = findNode(c.folder, path);
+            if (found) {
+                return found;
+            }
+        }
+    }
+    return null;
+}
+
+function findParentPath(root: OrderedFolder, folderPath: string): string | null {
+    for (const c of root.children) {
+        if (c.kind === 'folder') {
+            if (c.folder.path === folderPath) {
+                return root.path;
+            }
+            const found = findParentPath(c.folder, folderPath);
+            if (found !== null) {
+                return found;
+            }
+        }
+    }
+    return null;
+}
+
+/**
+ * Reorder mixed group/folder/script siblings inside the container `dir`.
+ * Keys are `g:<name>` for groups (root only), `f:<path>` for folders and
+ * `s:<id>` for scripts. Scripts moving in from a group are ungrouped (a script
+ * can only land in its own filesystem dir).
+ * Keys that aren't siblings of `dir` are ignored; `beforeKey` undefined appends.
+ */
+export async function dropTreeNodes(
+    store: ConfigStore,
+    all: ScriptInfo[],
+    movingKeys: string[],
+    dir: string,
+    beforeKey?: string,
+): Promise<void> {
+    if (!movingKeys.length) {
+        return;
+    }
+    const config = await store.load();
+    const byId = new Map(all.map((s) => [s.id, s]));
+    // Grouped scripts dragged into their own dir leave the group and join the tree.
+    const joiningIds = new Set(
+        movingKeys
+            .filter((k) => k.startsWith('s:'))
+            .map((k) => k.slice(2))
+            .filter((id) => byId.get(id)?.group && byId.get(id)?.pkgRelDir === dir),
+    );
+    let siblings: string[];
+    if (dir === '') {
+        // Root: groups, folders and scripts share one index space.
+        const effective = all.map((s) => (joiningIds.has(s.id) ? { ...s, group: undefined } : s));
+        siblings = buildRoot(effective, config).map(rootKey);
+    } else {
+        const treeScripts = all.filter((s) => !s.group || joiningIds.has(s.id));
+        const tree = buildFolderTree(treeScripts, config.folders ?? {});
+        const node = findNode(tree, dir);
+        if (!node) {
+            return;
+        }
+        siblings = node.children.map(childKey);
+    }
+    const siblingSet = new Set(siblings);
+    const moving = movingKeys.filter((k) => siblingSet.has(k));
+    if (!moving.length) {
+        return;
+    }
+    const before = beforeKey && siblingSet.has(beforeKey) ? beforeKey : undefined;
+    const ordered = reorderKeys(siblings, moving, before);
+    const folders = { ...(config.folders ?? {}) };
+    const groups = { ...(config.groups ?? {}) };
+    ordered.forEach((k, i) => {
+        if (k.startsWith('g:')) {
+            groups[k.slice(2)] = i;
+        } else if (k.startsWith('f:')) {
+            folders[k.slice(2)] = i;
+        } else {
+            const id = k.slice(2);
+            const group = joiningIds.has(id) ? undefined : config.scripts[id]?.group;
+            config.scripts[id] = { ...config.scripts[id], group, order: i };
+        }
+    });
+    config.folders = folders;
+    config.groups = groups;
+    await store.save(config);
+}
+
 const containerKey = (s: ScriptInfo): string => (s.group ? `g:${s.group}` : `d:${s.pkgRelDir}`);
 
 function containerScripts(all: ScriptInfo[], key: string): ScriptInfo[] {
     return sortScripts(all.filter((s) => containerKey(s) === key));
 }
 
-export type ScriptDropTarget =
-    | { kind: 'group'; name: string; beforeId?: string }
-    | { kind: 'dir'; dir: string; beforeId?: string }
-    | { kind: 'ungroup' };
+export type ScriptDropTarget = { kind: 'group'; name: string; beforeId?: string } | { kind: 'ungroup' };
 
-/** Move scripts into a group / folder and/or reorder them, persisting the result. */
+/** Move scripts into a group (with optional position) or back out of any group. */
 export async function dropScripts(store: ConfigStore, all: ScriptInfo[], ids: string[], target: ScriptDropTarget): Promise<void> {
     const byId = new Map(all.map((s) => [s.id, s]));
-    let moving = ids.filter((id) => byId.has(id));
-    // A folder's contents are filesystem-derived, so only same-dir scripts can land there.
-    if (target.kind === 'dir') {
-        moving = moving.filter((id) => byId.get(id)!.pkgRelDir === target.dir);
-    }
+    const moving = ids.filter((id) => byId.has(id));
     if (!moving.length) {
         return;
     }
@@ -119,12 +270,10 @@ export async function dropScripts(store: ConfigStore, all: ScriptInfo[], ids: st
         return;
     }
 
-    const key = target.kind === 'group' ? `g:${target.name}` : `d:${target.dir}`;
-    const current = containerScripts(all, key).map((s) => s.id);
+    const current = containerScripts(all, `g:${target.name}`).map((s) => s.id);
     const ordered = reorderKeys(current, moving, target.beforeId);
-    const group = target.kind === 'group' ? target.name : undefined;
     for (const id of moving) {
-        config.scripts[id] = { ...config.scripts[id], group };
+        config.scripts[id] = { ...config.scripts[id], group: target.name };
     }
     ordered.forEach((id, i) => {
         config.scripts[id] = { ...config.scripts[id], order: i };
@@ -132,20 +281,7 @@ export async function dropScripts(store: ConfigStore, all: ScriptInfo[], ids: st
     await store.save(config);
 }
 
-function findSiblings(parent: OrderedFolder, path: string): OrderedFolder[] | null {
-    if (parent.folders.some((f) => f.path === path)) {
-        return parent.folders;
-    }
-    for (const f of parent.folders) {
-        const found = findSiblings(f, path);
-        if (found) {
-            return found;
-        }
-    }
-    return null;
-}
-
-/** Reorder folders within their shared parent, persisting the new indices. */
+/** Reorder folders within their shared parent (sidebar drag). `beforeKey` may be a folder path or `s:<id>`. */
 export async function dropFolders(store: ConfigStore, all: ScriptInfo[], movingPaths: string[], beforePath?: string): Promise<void> {
     if (!movingPaths.length) {
         return;
@@ -153,21 +289,15 @@ export async function dropFolders(store: ConfigStore, all: ScriptInfo[], movingP
     const config = await store.load();
     const ungrouped = all.filter((s) => !s.group);
     const tree = buildFolderTree(ungrouped, config.folders ?? {});
-    const siblings = findSiblings(tree, movingPaths[0]);
-    if (!siblings) {
+    const parent = findParentPath(tree, movingPaths[0]);
+    if (parent === null) {
         return;
     }
-    const siblingPaths = siblings.map((f) => f.path);
-    const moving = movingPaths.filter((p) => siblingPaths.includes(p));
-    if (!moving.length) {
-        return;
-    }
-    const before = beforePath && siblingPaths.includes(beforePath) ? beforePath : undefined;
-    const ordered = reorderKeys(siblingPaths, moving, before);
-    const folders = { ...(config.folders ?? {}) };
-    ordered.forEach((p, i) => {
-        folders[p] = i;
-    });
-    config.folders = folders;
-    await store.save(config);
+    await dropTreeNodes(
+        store,
+        all,
+        movingPaths.map((p) => `f:${p}`),
+        parent,
+        beforePath ? `f:${beforePath}` : undefined,
+    );
 }

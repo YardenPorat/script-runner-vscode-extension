@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo } from './model';
 import { ScriptTreeProvider } from './tree';
 import { runScript } from './runner';
-import { buildFolderTree, dropFolders, dropScripts, OrderedFolder, ScriptDropTarget, sortScripts } from './order';
+import { buildRoot, dropScripts, dropTreeNodes, OrderedFolder, ScriptDropTarget } from './order';
 
 interface PanelScript {
     id: string;
@@ -18,23 +18,30 @@ interface PanelScript {
     group?: string;
 }
 
+type PanelChild =
+    | { kind: 'group'; group: PanelGroup }
+    | { kind: 'folder'; folder: PanelFolder }
+    | { kind: 'script'; script: PanelScript };
+
 interface PanelFolder {
     label: string;
     path: string;
     count: number;
-    folders: PanelFolder[];
-    scripts: PanelScript[];
+    collapsed: boolean;
+    /** Subfolders and scripts interleaved in display order (never groups) */
+    children: PanelChild[];
 }
 
 interface PanelGroup {
     name: string;
     count: number;
+    collapsed: boolean;
     scripts: PanelScript[];
 }
 
 interface PanelData {
-    groups: PanelGroup[];
-    tree: PanelFolder;
+    /** Groups, folders and scripts interleaved in root display order */
+    root: PanelChild[];
 }
 
 function toPanelScript(s: ScriptInfo, showLocation: boolean): PanelScript {
@@ -50,43 +57,42 @@ function toPanelScript(s: ScriptInfo, showLocation: boolean): PanelScript {
     };
 }
 
-function toPanelFolder(f: OrderedFolder): PanelFolder {
+function toPanelFolder(f: OrderedFolder, collapsedFolders: Set<string>): PanelFolder {
     return {
         label: f.label,
         path: f.path,
         count: f.count,
-        folders: f.folders.map(toPanelFolder),
-        scripts: f.scripts.map((s) => toPanelScript(s, false)),
+        collapsed: collapsedFolders.has(f.path),
+        children: f.children.map((c) =>
+            c.kind === 'folder'
+                ? { kind: 'folder', folder: toPanelFolder(c.folder, collapsedFolders) }
+                : { kind: 'script', script: toPanelScript(c.script, false) },
+        ),
     };
 }
 
 async function buildData(provider: ScriptTreeProvider, store: ConfigStore): Promise<PanelData> {
     const scripts = await provider.ensureScripts();
     const config = await store.load();
-
-    const grouped = new Map<string, ScriptInfo[]>();
-    const ungrouped: ScriptInfo[] = [];
-    for (const script of scripts) {
-        if (script.group) {
-            const list = grouped.get(script.group) ?? [];
-            list.push(script);
-            grouped.set(script.group, list);
-        } else {
-            ungrouped.push(script);
+    const collapsed = provider.getCollapsedState();
+    const root: PanelChild[] = buildRoot(scripts, config).map((c) => {
+        if (c.kind === 'group') {
+            return {
+                kind: 'group',
+                group: {
+                    name: c.name,
+                    count: c.scripts.length,
+                    collapsed: collapsed.groups.has(c.name),
+                    scripts: c.scripts.map((s) => toPanelScript(s, true)),
+                },
+            };
         }
-    }
-
-    const orderedGroups = [
-        ...(config.groups ?? []).filter((g) => grouped.has(g)),
-        ...[...grouped.keys()].filter((g) => !config.groups?.includes(g)).sort(),
-    ];
-
-    const groups: PanelGroup[] = orderedGroups.map((name) => {
-        const list = sortScripts(grouped.get(name) ?? []);
-        return { name, count: list.length, scripts: list.map((s) => toPanelScript(s, true)) };
+        if (c.kind === 'folder') {
+            return { kind: 'folder', folder: toPanelFolder(c.folder, collapsed.folders) };
+        }
+        return { kind: 'script', script: toPanelScript(c.script, false) };
     });
-
-    return { groups, tree: toPanelFolder(buildFolderTree(ungrouped, config.folders ?? {})) };
+    return { root };
 }
 
 export interface PanelHandlers {
@@ -131,21 +137,65 @@ export class ScriptPanel {
     }
 
     private readonly disposables: vscode.Disposable[] = [];
+    private readonly wired: ScriptWebview;
 
     private constructor(
         private readonly panel: vscode.WebviewPanel,
+        provider: ScriptTreeProvider,
+        store: ConfigStore,
+        handlers: PanelHandlers,
+    ) {
+        this.wired = new ScriptWebview(panel.webview, provider, store, handlers);
+        panel.onDidDispose(() => this.dispose(), undefined, this.disposables);
+    }
+
+    private dispose(): void {
+        ScriptPanel.instance = undefined;
+        this.panel.dispose();
+        this.wired.dispose();
+        for (const d of this.disposables) {
+            d.dispose();
+        }
+    }
+}
+
+/** Sidebar variant: same webview UI, hosted in a WebviewView instead of an editor panel. */
+export class ScriptSidebarProvider implements vscode.WebviewViewProvider {
+    constructor(
+        private readonly provider: ScriptTreeProvider,
+        private readonly store: ConfigStore,
+        private readonly handlers: PanelHandlers,
+    ) {}
+
+    resolveWebviewView(view: vscode.WebviewView): void {
+        view.webview.options = { enableScripts: true };
+        const wired = new ScriptWebview(view.webview, this.provider, this.store, this.handlers);
+        view.onDidDispose(() => wired.dispose());
+    }
+}
+
+/** Wires a webview (editor panel or sidebar view) to script data and the message protocol. */
+class ScriptWebview {
+    private readonly disposables: vscode.Disposable[] = [];
+
+    constructor(
+        private readonly webview: vscode.Webview,
         private readonly provider: ScriptTreeProvider,
         private readonly store: ConfigStore,
         private readonly handlers: PanelHandlers,
     ) {
-        panel.webview.onDidReceiveMessage(
+        webview.onDidReceiveMessage(
             (msg: {
                 type: string;
                 id?: string;
                 ids?: string[];
                 target?: ScriptDropTarget;
-                paths?: string[];
-                beforePath?: string;
+                keys?: string[];
+                dir?: string;
+                before?: string;
+                kind?: 'folder' | 'group';
+                key?: string;
+                collapsed?: boolean;
             }) => {
                 const all = this.provider.getScripts();
                 const script = msg.id ? all.find((s) => s.id === msg.id) : undefined;
@@ -163,8 +213,11 @@ export class ScriptPanel {
                     void this.handlers.renameScript(script);
                 } else if (msg.type === 'dropScripts' && msg.ids?.length && msg.target) {
                     void dropScripts(this.store, all, msg.ids, msg.target).then(() => this.provider.refresh());
-                } else if (msg.type === 'dropFolders' && msg.paths?.length) {
-                    void dropFolders(this.store, all, msg.paths, msg.beforePath).then(() => this.provider.refresh());
+                } else if (msg.type === 'dropTree' && msg.keys?.length && msg.dir !== undefined) {
+                    void dropTreeNodes(this.store, all, msg.keys, msg.dir, msg.before).then(() => this.provider.refresh());
+                } else if (msg.type === 'toggleCollapse' && msg.kind && msg.key !== undefined) {
+                    // Persist only; the webview already toggled its own DOM.
+                    this.provider.setCollapsed(msg.kind, msg.key, !!msg.collapsed);
                 } else if (msg.type === 'refresh') {
                     this.provider.refresh();
                 } else if (msg.type === 'ready') {
@@ -178,14 +231,18 @@ export class ScriptPanel {
         // Re-render whenever the underlying data changes.
         this.provider.onDidChangeTreeData(() => void this.render(), undefined, this.disposables);
 
-        panel.onDidDispose(() => this.dispose(), undefined, this.disposables);
-
-        panel.webview.html = this.html();
+        webview.html = this.html();
     }
 
     private async render(): Promise<void> {
         const data = await buildData(this.provider, this.store);
-        void this.panel.webview.postMessage({ type: 'data', data });
+        void this.webview.postMessage({ type: 'data', data });
+    }
+
+    dispose(): void {
+        for (const d of this.disposables) {
+            d.dispose();
+        }
     }
 
     private html(): string {
@@ -204,12 +261,11 @@ export class ScriptPanel {
     button { background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: none; padding: 4px 10px; border-radius: 2px; cursor: pointer; }
     button:hover { background: var(--vscode-button-secondaryHoverBackground); }
     #tree { padding: 8px; }
-    details { margin: 0; }
-    summary { cursor: pointer; padding: 2px 4px; border-radius: 3px; user-select: none; display: flex; align-items: center; gap: 6px; }
-    summary::-webkit-details-marker { display: none; }
-    summary:hover { background: var(--vscode-list-hoverBackground); }
+    .folder-header, .group-header { cursor: pointer; padding: 2px 4px; border-radius: 3px; user-select: none; display: flex; align-items: center; gap: 6px; }
+    .folder-header:hover, .group-header:hover { background: var(--vscode-list-hoverBackground); }
+    .folder.collapsed > .children, .group.collapsed > .children { display: none; }
     .count { color: var(--vscode-descriptionForeground); font-size: 0.85em; margin-left: 6px; }
-    .group > summary { color: var(--vscode-charts-yellow); font-weight: 600; }
+    .group > .group-header { color: var(--vscode-charts-yellow); font-weight: 600; }
     .children { margin-left: 16px; }
     .icon { width: 16px; height: 16px; flex: 0 0 auto; opacity: 0.9; }
     .folder-icon { color: var(--vscode-charts-blue, var(--vscode-foreground)); }
@@ -238,9 +294,9 @@ export class ScriptPanel {
     .action:hover { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
     .empty { color: var(--vscode-descriptionForeground); padding: 20px; text-align: center; }
     .hidden { display: none; }
-    .drop-before { box-shadow: inset 0 2px 0 0 var(--vscode-focusBorder); }
-    .drop-after { box-shadow: inset 0 -2px 0 0 var(--vscode-focusBorder); }
     .drop-into { background: var(--vscode-list-dropBackground, var(--vscode-list-hoverBackground)) !important; outline: 1px dashed var(--vscode-focusBorder); }
+    #dropline { position: fixed; height: 2px; background: var(--vscode-focusBorder); pointer-events: none; z-index: 10; display: none; border-radius: 1px; }
+    #dropline::before { content: ''; position: absolute; left: 0; top: -2px; width: 6px; height: 6px; border-radius: 50%; border: 2px solid var(--vscode-focusBorder); background: var(--vscode-editor-background); box-sizing: border-box; }
     .dragging { opacity: 0.5; }
 </style>
 </head>
@@ -255,9 +311,11 @@ export class ScriptPanel {
     <button id="clearSel" title="Clear selection">Clear</button>
 </div>
 <div id="tree"><div class="empty">Loading…</div></div>
+<div id="dropline"></div>
 <script nonce="${nonce}">
 const vscode = acquireVsCodeApi();
 const treeEl = document.getElementById('tree');
+const droplineEl = document.getElementById('dropline');
 const searchEl = document.getElementById('search');
 const selbarEl = document.getElementById('selbar');
 const selcountEl = document.getElementById('selcount');
@@ -266,9 +324,13 @@ let currentData = null;
 const selected = new Set();
 let lastIndex = -1;
 
-let dragKind = null; // 'script' | 'folder'
+let dragKind = null; // 'script' | 'folder' | 'group'
 let dragIds = [];
 let dragPath = null;
+let dragGroup = null; // group drag: group name
+let dragEl = null; // dragged DOM node (script row, folder div or group div)
+let dragDir = null; // script drag: source dir
+let dragParent = null; // folder drag: parent container path
 
 function visibleScripts() {
     return [...treeEl.querySelectorAll('.script:not(.hidden)')];
@@ -309,38 +371,126 @@ document.addEventListener('keydown', (e) => {
 searchEl.addEventListener('input', () => applyFilter(searchEl.value.trim().toLowerCase()));
 
 function endDrag() {
+    if (dragEl) dragEl.classList.remove('dragging');
     dragKind = null;
     dragIds = [];
     dragPath = null;
+    dragGroup = null;
+    dragEl = null;
+    dragDir = null;
+    dragParent = null;
     clearIndicator();
 }
 function clearIndicator() {
-    for (const el of treeEl.querySelectorAll('.drop-before,.drop-after,.drop-into')) {
-        el.classList.remove('drop-before', 'drop-after', 'drop-into');
+    for (const el of treeEl.querySelectorAll('.drop-into')) {
+        el.classList.remove('drop-into');
     }
+    droplineEl.style.display = 'none';
+}
+// Draw the insertion line at the exact edge where the dragged item would land.
+function showDropline(rect, after) {
+    droplineEl.style.left = rect.left + 'px';
+    droplineEl.style.width = rect.width + 'px';
+    droplineEl.style.top = ((after ? rect.bottom : rect.top) - 1) + 'px';
+    droplineEl.style.display = 'block';
 }
 function nextSibling(el, match) {
     let n = el.nextElementSibling;
     while (n && !match(n)) n = n.nextElementSibling;
     return n;
 }
+// Sibling key: groups by name, folders by path, scripts by id (matches order.ts).
+function keyOf(el) {
+    if (el.classList.contains('group')) return 'g:' + el.dataset.group;
+    return el.classList.contains('folder') ? 'f:' + el.dataset.path : 's:' + el.dataset.id;
+}
+// Workspace-relative path of the container holding el ('' at the root; groups live at the root).
+function containerDir(el) {
+    const parent = el.parentElement.closest('.folder');
+    return parent ? parent.dataset.path : '';
+}
+function nextTreeSibling(el) {
+    return nextSibling(el, (x) => x.classList.contains('script') || x.classList.contains('folder') || x.classList.contains('group'));
+}
 function dropInfo(e) {
     if (dragKind === 'script') {
         const row = e.target.closest('.script');
         if (row) {
+            if (row === dragEl) return null;
+            // Group rows always accept (join/reorder); tree rows only within the same dir.
+            if (!row.dataset.group && row.dataset.dir !== dragDir) return null;
             const r = row.getBoundingClientRect();
             return { type: 'script-row', el: row, after: e.clientY > r.top + r.height / 2 };
         }
-        const groupSum = e.target.closest('details.group');
-        if (groupSum) return { type: 'group', el: groupSum };
-        const folderSum = e.target.closest('details:not(.group)');
-        if (folderSum) return { type: 'dir', el: folderSum };
+        const grp = e.target.closest('.group');
+        if (grp) {
+            const header = grp.querySelector(':scope > .group-header');
+            if (e.target.closest('.group-header') === header && dragDir === '') {
+                // Root scripts can slot in next to a group via the header edges; the middle joins it.
+                const r = header.getBoundingClientRect();
+                if (e.clientY < r.top + r.height * 0.25) return { type: 'group-edge', el: grp, after: false };
+                if (e.clientY >= r.bottom - r.height * 0.25) return { type: 'group-edge', el: grp, after: true };
+            }
+            return { type: 'group', el: grp };
+        }
+        const fd = e.target.closest('.folder');
+        if (fd) {
+            const canInto = fd.dataset.path === dragDir; // scripts land only in their own dir
+            const canReorder = containerDir(fd) === dragDir; // sibling folder: interleave next to it
+            const header = fd.querySelector(':scope > .folder-header');
+            if (e.target.closest('.folder-header') === header && canReorder) {
+                // Header edges reorder next to the folder; the middle (if valid) drops into it.
+                const r = header.getBoundingClientRect();
+                const mid = r.top + r.height / 2;
+                const beforeZone = canInto ? r.top + r.height * 0.25 : mid;
+                const afterZone = canInto ? r.bottom - r.height * 0.25 : mid;
+                if (e.clientY < beforeZone) return { type: 'folder', el: fd, after: false };
+                if (e.clientY >= afterZone) return { type: 'folder', el: fd, after: true };
+            }
+            return canInto ? { type: 'dir', el: fd } : null;
+        }
         return { type: 'ungroup', el: null };
     }
     if (dragKind === 'folder') {
-        const fd = e.target.closest('details:not(.group)');
-        if (fd && fd.dataset.path !== dragPath) {
-            const r = fd.querySelector(':scope > summary').getBoundingClientRect();
+        if (dragEl && dragEl.contains(e.target)) return null;
+        const grp = e.target.closest('.group');
+        if (grp) {
+            // Root folders can slot in next to a group (groups live at the root).
+            if (dragParent !== '') return null;
+            const r = grp.querySelector(':scope > .group-header').getBoundingClientRect();
+            return { type: 'group-edge', el: grp, after: e.clientY > r.top + r.height / 2 };
+        }
+        const row = e.target.closest('.script');
+        if (row) {
+            // Folders reorder only among siblings of their own parent container.
+            if (row.dataset.group || containerDir(row) !== dragParent) return null;
+            const r = row.getBoundingClientRect();
+            return { type: 'script-row', el: row, after: e.clientY > r.top + r.height / 2 };
+        }
+        const fd = e.target.closest('.folder');
+        if (fd && fd !== dragEl && containerDir(fd) === dragParent) {
+            const r = fd.querySelector(':scope > .folder-header').getBoundingClientRect();
+            return { type: 'folder', el: fd, after: e.clientY > r.top + r.height / 2 };
+        }
+        return null;
+    }
+    if (dragKind === 'group') {
+        if (dragEl && dragEl.contains(e.target)) return null;
+        const grp = e.target.closest('.group');
+        if (grp && grp !== dragEl) {
+            const r = grp.querySelector(':scope > .group-header').getBoundingClientRect();
+            return { type: 'group-edge', el: grp, after: e.clientY > r.top + r.height / 2 };
+        }
+        const row = e.target.closest('.script');
+        if (row) {
+            // Groups reorder only among root-level items.
+            if (row.dataset.group || containerDir(row) !== '') return null;
+            const r = row.getBoundingClientRect();
+            return { type: 'script-row', el: row, after: e.clientY > r.top + r.height / 2 };
+        }
+        const fd = e.target.closest('.folder');
+        if (fd && containerDir(fd) === '') {
+            const r = fd.querySelector(':scope > .folder-header').getBoundingClientRect();
             return { type: 'folder', el: fd, after: e.clientY > r.top + r.height / 2 };
         }
         return null;
@@ -350,46 +500,47 @@ function dropInfo(e) {
 function showIndicator(info) {
     clearIndicator();
     if (info.type === 'script-row') {
-        info.el.classList.add(info.after ? 'drop-after' : 'drop-before');
-    } else if (info.type === 'group' || info.type === 'dir') {
-        info.el.querySelector(':scope > summary').classList.add('drop-into');
-    } else if (info.type === 'folder') {
-        info.el.querySelector(':scope > summary').classList.add(info.after ? 'drop-after' : 'drop-before');
+        showDropline(info.el.getBoundingClientRect(), info.after);
+    } else if (info.type === 'group') {
+        info.el.querySelector(':scope > .group-header').classList.add('drop-into');
+    } else if (info.type === 'dir') {
+        info.el.querySelector(':scope > .folder-header').classList.add('drop-into');
+    } else if (info.type === 'folder' || info.type === 'group-edge') {
+        // Dropping after a container inserts past its children, so use the whole box's rect.
+        showDropline(info.el.getBoundingClientRect(), info.after);
     }
 }
 function post(type, extra) {
     vscode.postMessage(Object.assign({ type }, extra));
 }
 function sendDrop(info) {
-    if (dragKind === 'script') {
-        if (info.type === 'script-row') {
-            const row = info.el;
-            let beforeId;
-            if (!info.after) beforeId = row.dataset.id;
-            else {
-                const n = nextSibling(row, (x) => x.classList.contains('script'));
-                beforeId = n ? n.dataset.id : undefined;
-            }
-            const target = row.dataset.group
-                ? { kind: 'group', name: row.dataset.group, beforeId }
-                : { kind: 'dir', dir: row.dataset.dir, beforeId };
-            post('dropScripts', { ids: dragIds, target });
-        } else if (info.type === 'group') {
-            post('dropScripts', { ids: dragIds, target: { kind: 'group', name: info.el.dataset.group } });
-        } else if (info.type === 'dir') {
-            post('dropScripts', { ids: dragIds, target: { kind: 'dir', dir: info.el.dataset.path } });
-        } else if (info.type === 'ungroup') {
-            post('dropScripts', { ids: dragIds, target: { kind: 'ungroup' } });
-        }
-    } else if (dragKind === 'folder' && info.type === 'folder') {
-        const fd = info.el;
-        let beforePath;
-        if (!info.after) beforePath = fd.dataset.path;
+    const keys =
+        dragKind === 'script' ? dragIds.map((id) => 's:' + id) : dragKind === 'folder' ? ['f:' + dragPath] : ['g:' + dragGroup];
+    if (dragKind === 'script' && info.type === 'group') {
+        post('dropScripts', { ids: dragIds, target: { kind: 'group', name: info.el.dataset.group } });
+    } else if (dragKind === 'script' && info.type === 'ungroup') {
+        post('dropScripts', { ids: dragIds, target: { kind: 'ungroup' } });
+    } else if (dragKind === 'script' && info.type === 'script-row' && info.el.dataset.group) {
+        // Reorder within a group (groups hold scripts only).
+        const row = info.el;
+        let beforeId;
+        if (!info.after) beforeId = row.dataset.id;
         else {
-            const n = nextSibling(fd, (x) => x.tagName === 'DETAILS' && !x.classList.contains('group'));
-            beforePath = n ? n.dataset.path : undefined;
+            const n = nextSibling(row, (x) => x.classList.contains('script'));
+            beforeId = n ? n.dataset.id : undefined;
         }
-        post('dropFolders', { paths: [dragPath], beforePath });
+        post('dropScripts', { ids: dragIds, target: { kind: 'group', name: row.dataset.group, beforeId } });
+    } else if (dragKind === 'script' && info.type === 'dir') {
+        post('dropTree', { keys, dir: info.el.dataset.path });
+    } else if (info.type === 'script-row' || info.type === 'folder' || info.type === 'group-edge') {
+        // Reorder among siblings — anchor may be a script, a folder or a group.
+        let before;
+        if (!info.after) before = keyOf(info.el);
+        else {
+            const n = nextTreeSibling(info.el);
+            before = n ? keyOf(n) : undefined;
+        }
+        post('dropTree', { keys, dir: containerDir(info.el), before });
     }
 }
 treeEl.addEventListener('dragover', (e) => {
@@ -467,6 +618,9 @@ function scriptNode(s) {
         dragKind = 'script';
         dragIds = selected.size && selected.has(s.id) ? [...selected] : [s.id];
         dragPath = null;
+        dragEl = row;
+        dragDir = s.dir;
+        row.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', s.id);
     });
@@ -521,60 +675,83 @@ function scriptNode(s) {
     return row;
 }
 
-function folderNode(f, open) {
-    if (!f.folders.length && !f.scripts.length) return null;
-    const details = el('details');
+function folderNode(f) {
+    if (!f.children.length) return null;
+    // Custom collapsible (not native <details>): Chromium won't start a drag from a
+    // <summary>, so the header is a plain draggable <div> — same as script rows, which
+    // drag reliably. JS toggles the collapsed class; a drag gesture suppresses the click.
+    const details = el('div', 'folder' + (f.collapsed ? ' collapsed' : ''));
     details.dataset.path = f.path;
-    details.open = open;
-    // Drag the whole <details> (Chromium won't reliably start a drag from a <summary>).
-    // Nested script rows / sub-folders stopPropagation so the innermost element wins.
-    details.draggable = true;
-    details.addEventListener('dragstart', (e) => {
+    const header = el('div', 'folder-header');
+    header.draggable = true;
+    header.appendChild(iconEl(ICONS.folder));
+    header.appendChild(el('span', 'label', f.label));
+    header.appendChild(el('span', 'count', String(f.count)));
+    header.addEventListener('dragstart', (e) => {
         e.stopPropagation();
         dragKind = 'folder';
         dragPath = f.path;
         dragIds = [];
+        dragEl = details;
+        dragParent = containerDir(details);
+        details.classList.add('dragging');
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', f.path);
     });
-    details.addEventListener('dragend', endDrag);
-    const summary = el('summary');
-    summary.appendChild(iconEl(ICONS.folder));
-    summary.appendChild(el('span', 'label', f.label));
-    summary.appendChild(el('span', 'count', String(f.count)));
-    details.appendChild(summary);
+    header.addEventListener('dragend', endDrag);
+    header.addEventListener('click', () => {
+        const collapsed = details.classList.toggle('collapsed');
+        vscode.postMessage({ type: 'toggleCollapse', kind: 'folder', key: f.path, collapsed });
+    });
+    details.appendChild(header);
     const children = el('div', 'children');
-    for (const sub of f.folders) {
-        const n = folderNode(sub, open);
+    for (const c of f.children) {
+        const n = c.kind === 'folder' ? folderNode(c.folder) : scriptNode(c.script);
         if (n) children.appendChild(n);
     }
-    for (const s of f.scripts) children.appendChild(scriptNode(s));
     details.appendChild(children);
     return details;
+}
+
+function groupNode(g) {
+    // Same custom collapsible pattern as folders (a <summary> won't start a drag).
+    const box = el('div', 'group' + (g.collapsed ? ' collapsed' : ''));
+    box.dataset.group = g.name;
+    const header = el('div', 'group-header');
+    header.dataset.vscodeContext = JSON.stringify({ webviewSection: 'srGroup', groupName: g.name, preventDefaultContextMenuItems: true });
+    header.draggable = true;
+    header.appendChild(iconEl(ICONS.group));
+    header.appendChild(el('span', 'label', g.name));
+    header.appendChild(el('span', 'count', String(g.count)));
+    header.addEventListener('dragstart', (e) => {
+        e.stopPropagation();
+        dragKind = 'group';
+        dragGroup = g.name;
+        dragIds = [];
+        dragPath = null;
+        dragEl = box;
+        box.classList.add('dragging');
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', g.name);
+    });
+    header.addEventListener('dragend', endDrag);
+    header.addEventListener('click', () => {
+        const collapsed = box.classList.toggle('collapsed');
+        vscode.postMessage({ type: 'toggleCollapse', kind: 'group', key: g.name, collapsed });
+    });
+    box.appendChild(header);
+    const children = el('div', 'children');
+    for (const s of g.scripts) children.appendChild(scriptNode(s));
+    box.appendChild(children);
+    return box;
 }
 
 function renderTree(data) {
     treeEl.innerHTML = '';
     let any = false;
-    for (const g of data.groups) {
-        any = true;
-        const details = el('details', 'group');
-        details.dataset.group = g.name;
-        details.open = true;
-        const summary = el('summary');
-        summary.appendChild(iconEl(ICONS.group));
-        summary.appendChild(el('span', 'label', g.name));
-        summary.appendChild(el('span', 'count', String(g.count)));
-        details.appendChild(summary);
-        const children = el('div', 'children');
-        for (const s of g.scripts) children.appendChild(scriptNode(s));
-        details.appendChild(children);
-        treeEl.appendChild(details);
-    }
-    // Root folder tree — root scripts sort before folders.
-    for (const s of data.tree.scripts) { any = true; treeEl.appendChild(scriptNode(s)); }
-    for (const sub of data.tree.folders) {
-        const n = folderNode(sub, true);
+    // Root — groups, folders and scripts interleaved in persisted order.
+    for (const c of data.root) {
+        const n = c.kind === 'group' ? groupNode(c.group) : c.kind === 'folder' ? folderNode(c.folder) : scriptNode(c.script);
         if (n) { any = true; treeEl.appendChild(n); }
     }
     if (!any) treeEl.appendChild(el('div', 'empty', 'No scripts found.'));
@@ -587,11 +764,11 @@ function applyFilter(q) {
         row.classList.toggle('hidden', !match);
     }
     // Hide containers with no visible scripts; expand all while filtering.
-    const containers = treeEl.querySelectorAll('details');
+    const containers = treeEl.querySelectorAll('.group, .folder');
     for (const d of containers) {
         const visible = d.querySelectorAll('.script:not(.hidden)').length > 0;
         d.classList.toggle('hidden', !visible);
-        if (q) d.open = true;
+        if (q) d.classList.remove('collapsed');
     }
 }
 
@@ -599,13 +776,5 @@ vscode.postMessage({ type: 'ready' });
 </script>
 </body>
 </html>`;
-    }
-
-    private dispose(): void {
-        ScriptPanel.instance = undefined;
-        this.panel.dispose();
-        for (const d of this.disposables) {
-            d.dispose();
-        }
     }
 }

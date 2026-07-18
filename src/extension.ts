@@ -1,8 +1,8 @@
 import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo } from './model';
-import { ScriptTreeProvider, ScriptItem, GroupItem, FolderItem } from './tree';
+import { ScriptTreeProvider, ScriptItem, GroupItem } from './tree';
 import { runScript, disposeTerminals, onTerminalClosed, registerTerminalTracking } from './runner';
-import { ScriptPanel } from './panel';
+import { ScriptPanel, ScriptSidebarProvider } from './panel';
 
 async function pickScript(provider: ScriptTreeProvider, placeHolder: string): Promise<ScriptInfo | undefined> {
     const scripts = await provider.ensureScripts();
@@ -130,13 +130,6 @@ export function activate(context: vscode.ExtensionContext): void {
         renameScript: (script: ScriptInfo) => renameScriptFor(store, provider, script),
     };
 
-    const treeView = vscode.window.createTreeView('scriptRunner.scripts', {
-        treeDataProvider: provider,
-        dragAndDropController: provider,
-        canSelectMany: true,
-        showCollapseAll: true,
-    });
-
     // Re-adopt the editor panel VS Code restores after an extension update/restart.
     vscode.window.registerWebviewPanelSerializer('scriptRunner.panel', {
         deserializeWebviewPanel(panel: vscode.WebviewPanel) {
@@ -145,18 +138,12 @@ export function activate(context: vscode.ExtensionContext): void {
             return Promise.resolve();
         },
     });
-    const persistCollapse = (element: unknown, collapsed: boolean) => {
-        if (element instanceof FolderItem) {
-            provider.setCollapsed('folder', element.path, collapsed);
-        } else if (element instanceof GroupItem) {
-            provider.setCollapsed('group', element.groupName, collapsed);
-        }
-    };
 
     context.subscriptions.push(
-        treeView,
-        treeView.onDidExpandElement((e) => persistCollapse(e.element, false)),
-        treeView.onDidCollapseElement((e) => persistCollapse(e.element, true)),
+        vscode.window.registerWebviewViewProvider(
+            'scriptRunner.scripts',
+            new ScriptSidebarProvider(provider, store, panelHandlers),
+        ),
 
         vscode.commands.registerCommand('scriptRunner.refresh', () => provider.refresh()),
 
@@ -238,25 +225,33 @@ export function activate(context: vscode.ExtensionContext): void {
         }),
 
         vscode.commands.registerCommand('scriptRunner.renameGroup', async (item?: unknown) => {
-            if (!(item instanceof GroupItem)) {
+            // Native tree passes a GroupItem; webview context menus pass data-vscode-context.
+            const groupName =
+                item instanceof GroupItem
+                    ? item.groupName
+                    : item && typeof item === 'object' && typeof (item as { groupName?: unknown }).groupName === 'string'
+                      ? (item as { groupName: string }).groupName
+                      : undefined;
+            if (!groupName) {
                 return;
             }
             const name = await vscode.window.showInputBox({
-                prompt: `Rename group "${item.groupName}"`,
-                value: item.groupName,
+                prompt: `Rename group "${groupName}"`,
+                value: groupName,
                 validateInput: (v) => (v.trim() ? undefined : 'Group name cannot be empty'),
             });
-            if (name === undefined || name.trim() === item.groupName) {
+            if (name === undefined || name.trim() === groupName) {
                 return;
             }
             const config = await store.load();
             for (const entry of Object.values(config.scripts)) {
-                if (entry.group === item.groupName) {
+                if (entry.group === groupName) {
                     entry.group = name.trim();
                 }
             }
-            if (config.groups) {
-                config.groups = config.groups.map((g) => (g === item.groupName ? name.trim() : g));
+            if (config.groups && groupName in config.groups) {
+                const { [groupName]: order, ...rest } = config.groups;
+                config.groups = { ...rest, [name.trim()]: order };
             }
             await store.save(config);
             provider.refresh();

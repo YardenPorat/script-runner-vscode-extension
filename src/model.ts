@@ -31,8 +31,8 @@ export interface ScriptEntry {
 
 export interface RunnerConfig {
   $schema?: string;
-  /** Optional explicit group ordering */
-  groups?: string[];
+  /** Group sort index at the root, keyed by group name (shares the index space with folders/scripts) */
+  groups?: Record<string, number>;
   /** Folder sort index, keyed by workspace-relative folder path */
   folders?: Record<string, number>;
   /** Keyed by `<pkgRelDir>#<scriptName>` */
@@ -58,9 +58,10 @@ export class ConfigStore {
     }
     try {
       const raw = await vscode.workspace.fs.readFile(uri);
-      const parsed = JSON.parse(
-        Buffer.from(raw).toString("utf8"),
-      ) as RunnerConfig;
+      const parsed = JSON.parse(Buffer.from(raw).toString("utf8")) as Omit<
+        RunnerConfig,
+        "groups"
+      > & { groups?: string[] | Record<string, number> };
       if (
         typeof parsed !== "object" ||
         parsed === null ||
@@ -69,7 +70,11 @@ export class ConfigStore {
       ) {
         return { scripts: {} };
       }
-      return parsed;
+      // Migrate the legacy ordered-array form to the index map.
+      if (Array.isArray(parsed.groups)) {
+        parsed.groups = Object.fromEntries(parsed.groups.map((g, i) => [g, i]));
+      }
+      return parsed as RunnerConfig;
     } catch {
       return { scripts: {} };
     }
@@ -84,7 +89,7 @@ export class ConfigStore {
       return;
     }
     const clean: RunnerConfig = { scripts: {} };
-    if (config.groups?.length) {
+    if (config.groups && Object.keys(config.groups).length) {
       clean.groups = config.groups;
     }
     if (config.folders && Object.keys(config.folders).length) {
