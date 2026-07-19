@@ -10,6 +10,9 @@ export function sortScripts(scripts: ScriptInfo[]): ScriptInfo[] {
     );
 }
 
+/** Effective directory of a script in the tree: root-pinned scripts live at '' regardless of their package dir. */
+export const treeDir = (s: ScriptInfo): string => (s.root ? '' : s.pkgRelDir);
+
 export type DirChild = { kind: 'folder'; folder: OrderedFolder } | { kind: 'script'; script: ScriptInfo };
 
 export interface OrderedFolder {
@@ -35,8 +38,9 @@ export function buildFolderTree(scripts: ScriptInfo[], folderOrder: Record<strin
     const root: DirNode = { dirs: new Map(), scripts: [] };
     for (const script of scripts) {
         let node = root;
-        if (script.pkgRelDir) {
-            for (const segment of script.pkgRelDir.split('/')) {
+        const dir = treeDir(script);
+        if (dir) {
+            for (const segment of dir.split('/')) {
                 let child = node.dirs.get(segment);
                 if (!child) {
                     child = { dirs: new Map(), scripts: [] };
@@ -182,8 +186,8 @@ function findParentPath(root: OrderedFolder, folderPath: string): string | null 
 /**
  * Reorder mixed group/folder/script siblings inside the container `dir`.
  * Keys are `g:<name>` for groups (root only), `f:<path>` for folders and
- * `s:<id>` for scripts. Scripts moving in from a group are ungrouped (a script
- * can only land in its own filesystem dir).
+ * `s:<id>` for scripts. Scripts can land at the root (pinned there, ungrouped)
+ * or in their own filesystem dir (unpinned, ungrouped).
  * Keys that aren't siblings of `dir` are ignored; `beforeKey` undefined appends.
  */
 export async function dropTreeNodes(
@@ -198,20 +202,26 @@ export async function dropTreeNodes(
     }
     const config = await store.load();
     const byId = new Map(all.map((s) => [s.id, s]));
-    // Grouped scripts dragged into their own dir leave the group and join the tree.
-    const joiningIds = new Set(
+    // Moving scripts land in `dir` when it's the root (pin) or their own dir (unpin);
+    // grouped ones leave their group. Others are filtered out by the sibling check.
+    const landingIds = new Set(
         movingKeys
             .filter((k) => k.startsWith('s:'))
             .map((k) => k.slice(2))
-            .filter((id) => byId.get(id)?.group && byId.get(id)?.pkgRelDir === dir),
+            .filter((id) => byId.has(id) && (dir === '' || byId.get(id)?.pkgRelDir === dir)),
     );
+    const landed = (s: ScriptInfo): ScriptInfo => ({
+        ...s,
+        group: undefined,
+        root: dir === '' && s.pkgRelDir !== '' ? true : undefined,
+    });
+    const effective = all.map((s) => (landingIds.has(s.id) ? landed(s) : s));
     let siblings: string[];
     if (dir === '') {
         // Root: groups, folders and scripts share one index space.
-        const effective = all.map((s) => (joiningIds.has(s.id) ? { ...s, group: undefined } : s));
         siblings = buildRoot(effective, config).map(rootKey);
     } else {
-        const treeScripts = all.filter((s) => !s.group || joiningIds.has(s.id));
+        const treeScripts = effective.filter((s) => !s.group);
         const tree = buildFolderTree(treeScripts, config.folders ?? {});
         const node = findNode(tree, dir);
         if (!node) {
@@ -235,8 +245,12 @@ export async function dropTreeNodes(
             folders[k.slice(2)] = i;
         } else {
             const id = k.slice(2);
-            const group = joiningIds.has(id) ? undefined : config.scripts[id]?.group;
-            config.scripts[id] = { ...config.scripts[id], group, order: i };
+            if (landingIds.has(id)) {
+                const root = dir === '' && byId.get(id)?.pkgRelDir !== '' ? true : undefined;
+                config.scripts[id] = { ...config.scripts[id], group: undefined, root, order: i };
+            } else {
+                config.scripts[id] = { ...config.scripts[id], order: i };
+            }
         }
     });
     config.folders = folders;

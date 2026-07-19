@@ -5,13 +5,17 @@
       "order": 1
     },
     "#install-latest": {
-      "order": 0
+      "order": 1
     },
     "#package": {
-      "order": 1
+      "order": 2
     },
     "#watch": {
       "order": 4
+    },
+    "example/app-example-1#example1": {
+      "order": 0,
+      "root": true
     },
     "example/app-example-2#example2": {
       "group": "starred",

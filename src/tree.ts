@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ConfigStore, ScriptInfo, scanScripts } from './model';
-import { buildRoot, dropFolders, dropScripts, dropTreeNodes, OrderedFolder, sortScripts } from './order';
+import { buildRoot, dropFolders, dropScripts, dropTreeNodes, OrderedFolder, sortScripts, treeDir } from './order';
 
 const collapseState = (collapsed: boolean): vscode.TreeItemCollapsibleState =>
     collapsed ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded;
@@ -141,7 +141,8 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
                         collapsedFolders.has(c.folder.path),
                     );
                 }
-                return new ScriptItem(c.script, false);
+                // Root-pinned scripts show their real location so the origin stays visible.
+                return new ScriptItem(c.script, !!c.script.root);
             });
         }
         if (element instanceof GroupItem) {
@@ -220,7 +221,7 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
                     this.store,
                     this.scripts,
                     payload.folderPaths.map((p) => `f:${p}`),
-                    target.script.pkgRelDir,
+                    treeDir(target.script),
                     `s:${target.script.id}`,
                 );
                 this.refresh();
@@ -234,8 +235,9 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
         }
 
         // Group header → join group (append). Grouped script → reorder within its group.
-        // Ungrouped script → reorder in the folder tree (may interleave with folders).
-        // Folder / empty space → remove from group (back to the folder tree).
+        // Ungrouped script → reorder in that script's container (root pins, own dir unpins).
+        // Own folder → move back into it. Other folder → remove from group.
+        // Empty space → pin to the root, outside any folder or group.
         if (target instanceof GroupItem) {
             await dropScripts(this.store, this.scripts, ids, { kind: 'group', name: target.groupName });
         } else if (target instanceof ScriptItem && target.script.group) {
@@ -249,11 +251,21 @@ export class ScriptTreeProvider implements vscode.TreeDataProvider<TreeNode>, vs
                 this.store,
                 this.scripts,
                 ids.map((id) => `s:${id}`),
-                target.script.pkgRelDir,
+                treeDir(target.script),
                 `s:${target.script.id}`,
             );
+        } else if (target instanceof FolderItem) {
+            const byId = new Map(this.scripts.map((s) => [s.id, s]));
+            const homeIds = ids.filter((id) => byId.get(id)?.pkgRelDir === target.path);
+            const otherIds = ids.filter((id) => byId.get(id)?.pkgRelDir !== target.path);
+            if (homeIds.length) {
+                await dropTreeNodes(this.store, this.scripts, homeIds.map((id) => `s:${id}`), target.path);
+            }
+            if (otherIds.length) {
+                await dropScripts(this.store, this.scripts, otherIds, { kind: 'ungroup' });
+            }
         } else {
-            await dropScripts(this.store, this.scripts, ids, { kind: 'ungroup' });
+            await dropTreeNodes(this.store, this.scripts, ids.map((id) => `s:${id}`), '');
         }
         this.refresh();
     }

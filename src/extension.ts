@@ -147,6 +147,24 @@ export function activate(context: vscode.ExtensionContext): void {
 
         vscode.commands.registerCommand('scriptRunner.refresh', () => provider.refresh()),
 
+        vscode.commands.registerCommand('scriptRunner.undo', async () => {
+            if (await store.undo()) {
+                provider.refresh();
+                vscode.window.setStatusBarMessage('Script Runner: undid last change', 2000);
+            } else {
+                vscode.window.setStatusBarMessage('Script Runner: nothing to undo', 2000);
+            }
+        }),
+
+        vscode.commands.registerCommand('scriptRunner.redo', async () => {
+            if (await store.redo()) {
+                provider.refresh();
+                vscode.window.setStatusBarMessage('Script Runner: redid last change', 2000);
+            } else {
+                vscode.window.setStatusBarMessage('Script Runner: nothing to redo', 2000);
+            }
+        }),
+
         vscode.commands.registerCommand('scriptRunner.openInEditor', () => {
             ScriptPanel.createOrShow(context, provider, store, panelHandlers);
         }),

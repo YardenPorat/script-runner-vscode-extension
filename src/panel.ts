@@ -90,7 +90,8 @@ async function buildData(provider: ScriptTreeProvider, store: ConfigStore): Prom
         if (c.kind === 'folder') {
             return { kind: 'folder', folder: toPanelFolder(c.folder, collapsed.folders) };
         }
-        return { kind: 'script', script: toPanelScript(c.script, false) };
+        // Root-pinned scripts show their real location so the origin stays visible.
+        return { kind: 'script', script: toPanelScript(c.script, !!c.script.root) };
     });
     return { root };
 }
@@ -218,6 +219,10 @@ class ScriptWebview {
                 } else if (msg.type === 'toggleCollapse' && msg.kind && msg.key !== undefined) {
                     // Persist only; the webview already toggled its own DOM.
                     this.provider.setCollapsed(msg.kind, msg.key, !!msg.collapsed);
+                } else if (msg.type === 'undo') {
+                    void vscode.commands.executeCommand('scriptRunner.undo');
+                } else if (msg.type === 'redo') {
+                    void vscode.commands.executeCommand('scriptRunner.redo');
                 } else if (msg.type === 'refresh') {
                     this.provider.refresh();
                 } else if (msg.type === 'ready') {
@@ -366,6 +371,21 @@ document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && selected.size) {
         e.preventDefault();
         clearSel();
+        return;
+    }
+    // Cmd/Ctrl+Z undoes the last config change (shift = redo, ctrl+y = redo).
+    // Skip text fields so the search box keeps its native text undo.
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    const mod = e.metaKey || e.ctrlKey;
+    if (!mod || e.altKey) return;
+    const key = e.key.toLowerCase();
+    if (key === 'z') {
+        e.preventDefault();
+        vscode.postMessage({ type: e.shiftKey ? 'redo' : 'undo' });
+    } else if (key === 'y' && e.ctrlKey) {
+        e.preventDefault();
+        vscode.postMessage({ type: 'redo' });
     }
 });
 searchEl.addEventListener('input', () => applyFilter(searchEl.value.trim().toLowerCase()));
@@ -417,16 +437,18 @@ function dropInfo(e) {
         const row = e.target.closest('.script');
         if (row) {
             if (row === dragEl) return null;
-            // Group rows always accept (join/reorder); tree rows only within the same dir.
-            if (!row.dataset.group && row.dataset.dir !== dragDir) return null;
+            // Group rows always accept (join/reorder); tree rows within the same dir,
+            // and root rows accept any script (dropping there pins it to the root).
+            if (!row.dataset.group && row.dataset.dir !== dragDir && containerDir(row) !== '') return null;
             const r = row.getBoundingClientRect();
             return { type: 'script-row', el: row, after: e.clientY > r.top + r.height / 2 };
         }
         const grp = e.target.closest('.group');
         if (grp) {
             const header = grp.querySelector(':scope > .group-header');
-            if (e.target.closest('.group-header') === header && dragDir === '') {
-                // Root scripts can slot in next to a group via the header edges; the middle joins it.
+            if (e.target.closest('.group-header') === header) {
+                // Any script can slot in next to a group via the header edges (pinning it
+                // to the root); the middle joins the group.
                 const r = header.getBoundingClientRect();
                 if (e.clientY < r.top + r.height * 0.25) return { type: 'group-edge', el: grp, after: false };
                 if (e.clientY >= r.bottom - r.height * 0.25) return { type: 'group-edge', el: grp, after: true };
@@ -436,7 +458,7 @@ function dropInfo(e) {
         const fd = e.target.closest('.folder');
         if (fd) {
             const canInto = fd.dataset.path === dragDir; // scripts land only in their own dir
-            const canReorder = containerDir(fd) === dragDir; // sibling folder: interleave next to it
+            const canReorder = containerDir(fd) === dragDir || containerDir(fd) === ''; // sibling folder, or any root folder (pins)
             const header = fd.querySelector(':scope > .folder-header');
             if (e.target.closest('.folder-header') === header && canReorder) {
                 // Header edges reorder next to the folder; the middle (if valid) drops into it.
@@ -519,7 +541,8 @@ function sendDrop(info) {
     if (dragKind === 'script' && info.type === 'group') {
         post('dropScripts', { ids: dragIds, target: { kind: 'group', name: info.el.dataset.group } });
     } else if (dragKind === 'script' && info.type === 'ungroup') {
-        post('dropScripts', { ids: dragIds, target: { kind: 'ungroup' } });
+        // Empty space → pin to the root, outside any folder or group.
+        post('dropTree', { keys, dir: '' });
     } else if (dragKind === 'script' && info.type === 'script-row' && info.el.dataset.group) {
         // Reorder within a group (groups hold scripts only).
         const row = info.el;

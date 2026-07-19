@@ -19,6 +19,8 @@ export interface ScriptInfo {
   comment?: string;
   /** Sort index within its container (group or folder); undefined sorts last. */
   order?: number;
+  /** Pin to the tree root regardless of the package's folder */
+  root?: boolean;
 }
 
 export interface ScriptEntry {
@@ -27,6 +29,8 @@ export interface ScriptEntry {
   order?: number;
   /** Display name override; does not change package.json */
   displayName?: string;
+  /** Pin to the tree root regardless of the package's folder */
+  root?: boolean;
 }
 
 export interface RunnerConfig {
@@ -50,7 +54,47 @@ function configUri(): vscode.Uri | undefined {
   return vscode.Uri.joinPath(folder.uri, rel);
 }
 
+const MAX_HISTORY = 50;
+
+/** Normalized form used for persistence and change detection. */
+function cleanConfig(config: RunnerConfig): RunnerConfig {
+  const clean: RunnerConfig = { scripts: {} };
+  if (config.groups && Object.keys(config.groups).length) {
+    clean.groups = config.groups;
+  }
+  if (config.folders && Object.keys(config.folders).length) {
+    clean.folders = config.folders;
+  }
+  for (const [key, entry] of Object.entries(config.scripts).sort(([a], [b]) =>
+    a.localeCompare(b),
+  )) {
+    const e: ScriptEntry = {};
+    if (entry.group) {
+      e.group = entry.group;
+    }
+    if (entry.comment) {
+      e.comment = entry.comment;
+    }
+    if (typeof entry.order === "number") {
+      e.order = entry.order;
+    }
+    if (entry.displayName) {
+      e.displayName = entry.displayName;
+    }
+    if (entry.root) {
+      e.root = true;
+    }
+    if (e.group || e.comment || typeof e.order === "number" || e.displayName || e.root) {
+      clean.scripts[key] = e;
+    }
+  }
+  return clean;
+}
+
 export class ConfigStore {
+  private readonly undoStack: RunnerConfig[] = [];
+  private readonly redoStack: RunnerConfig[] = [];
+
   async load(): Promise<RunnerConfig> {
     const uri = configUri();
     if (!uri) {
@@ -80,7 +124,7 @@ export class ConfigStore {
     }
   }
 
-  async save(config: RunnerConfig): Promise<void> {
+  private async write(config: RunnerConfig): Promise<void> {
     const uri = configUri();
     if (!uri) {
       void vscode.window.showErrorMessage(
@@ -88,37 +132,45 @@ export class ConfigStore {
       );
       return;
     }
-    const clean: RunnerConfig = { scripts: {} };
-    if (config.groups && Object.keys(config.groups).length) {
-      clean.groups = config.groups;
-    }
-    if (config.folders && Object.keys(config.folders).length) {
-      clean.folders = config.folders;
-    }
-    for (const [key, entry] of Object.entries(config.scripts).sort(([a], [b]) =>
-      a.localeCompare(b),
-    )) {
-      const e: ScriptEntry = {};
-      if (entry.group) {
-        e.group = entry.group;
-      }
-      if (entry.comment) {
-        e.comment = entry.comment;
-      }
-      if (typeof entry.order === "number") {
-        e.order = entry.order;
-      }
-      if (entry.displayName) {
-        e.displayName = entry.displayName;
-      }
-      if (e.group || e.comment || typeof e.order === "number" || e.displayName) {
-        clean.scripts[key] = e;
-      }
-    }
     await vscode.workspace.fs.writeFile(
       uri,
-      Buffer.from(JSON.stringify(clean, null, 2) + "\n", "utf8"),
+      Buffer.from(JSON.stringify(cleanConfig(config), null, 2) + "\n", "utf8"),
     );
+  }
+
+  async save(config: RunnerConfig): Promise<void> {
+    const prev = await this.load();
+    // Record history only for real changes so undo never appears to do nothing.
+    if (JSON.stringify(cleanConfig(prev)) !== JSON.stringify(cleanConfig(config))) {
+      this.undoStack.push(prev);
+      if (this.undoStack.length > MAX_HISTORY) {
+        this.undoStack.shift();
+      }
+      this.redoStack.length = 0;
+    }
+    await this.write(config);
+  }
+
+  /** Revert the last extension-made config change. Returns false when there is nothing to undo. */
+  async undo(): Promise<boolean> {
+    const prev = this.undoStack.pop();
+    if (!prev) {
+      return false;
+    }
+    this.redoStack.push(await this.load());
+    await this.write(prev);
+    return true;
+  }
+
+  /** Re-apply the last undone config change. Returns false when there is nothing to redo. */
+  async redo(): Promise<boolean> {
+    const next = this.redoStack.pop();
+    if (!next) {
+      return false;
+    }
+    this.undoStack.push(await this.load());
+    await this.write(next);
+    return true;
   }
 
   async update(id: string, patch: ScriptEntry): Promise<void> {
@@ -183,6 +235,7 @@ export async function scanScripts(store: ConfigStore): Promise<ScriptInfo[]> {
         group: entry?.group,
         comment: entry?.comment,
         order: entry?.order,
+        root: entry?.root,
       });
     }
   }

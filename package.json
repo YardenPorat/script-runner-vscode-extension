@@ -2,7 +2,7 @@
   "name": "monorepo-script-runner",
   "displayName": "Monorepo Script Runner",
   "description": "Discover, group, annotate and run package.json scripts across a monorepo. Config persists to a committable JSON file.",
-  "version": "0.16.0",
+  "version": "0.18.0",
   "publisher": "yarden-porat",
   "author": "Yarden Porat",
   "license": "MIT",
@@ -112,6 +112,18 @@
         "title": "Open Terminal in Working Dir",
         "category": "Script Runner",
         "icon": "$(terminal)"
+      },
+      {
+        "command": "scriptRunner.undo",
+        "title": "Undo Last Change",
+        "category": "Script Runner",
+        "icon": "$(discard)"
+      },
+      {
+        "command": "scriptRunner.redo",
+        "title": "Redo Last Change",
+        "category": "Script Runner",
+        "icon": "$(redo)"
       }
     ],
     "menus": {
