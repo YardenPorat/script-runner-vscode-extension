@@ -3,14 +3,32 @@
   "displayName": "Monorepo Script Runner",
   "description": "Discover, group, annotate and run package.json scripts across a monorepo. Config persists to a committable JSON file.",
   "version": "0.18.0",
-  "publisher": "yarden-porat",
+  "publisher": "yardenporat",
   "author": "Yarden Porat",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/YardenPorat/script-runner-vscode-extension.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YardenPorat/script-runner-vscode-extension/issues"
+  },
+  "homepage": "https://github.com/YardenPorat/script-runner-vscode-extension#readme",
   "engines": {
     "vscode": "^1.93.0"
   },
+  "icon": "icon.png",
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "monorepo",
+    "npm scripts",
+    "package.json",
+    "task runner",
+    "pnpm",
+    "yarn",
+    "workspace"
   ],
   "main": "./out-js/extension.js",
   "activationEvents": [
@@ -231,7 +249,10 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "mkdir -p out-packaged && vsce package --allow-missing-repository -o out-packaged/",
+    "test": "tsc -p tsconfig.test.json && node --test \"out-test/test/*.test.js\"",
+    "vscode:prepublish": "npm run compile",
+    "package": "mkdir -p out-packaged && vsce package -o out-packaged/",
+    "publish": "vsce publish",
     "install-latest": "code --install-extension \"$(ls -t out-packaged/*.vsix | head -1)\" --force"
   },
   "devDependencies": {

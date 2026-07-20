@@ -17,7 +17,7 @@ Discover, group, annotate and run `package.json` scripts across a monorepo.
 
 ```json
 {
-  "groups": ["Build", "Test"],
+  "groups": { "Build": 0, "Test": 1 },
   "scripts": {
     "packages/app#dev": { "group": "Build", "comment": "Starts the dev server on :3000" },
     "packages/lib#test": { "group": "Test" }
@@ -25,7 +25,7 @@ Discover, group, annotate and run `package.json` scripts across a monorepo.
 }
 ```
 
-Keys are `<package-dir-relative-to-workspace-root>#<script-name>` (root package uses `#<script-name>`). `groups` optionally fixes group ordering.
+Keys are `<package-dir-relative-to-workspace-root>#<script-name>` (root package uses `#<script-name>`). `groups` maps a group name to its sort index. (The legacy array form `["Build", "Test"]` is still read and migrated automatically.)
 
 ## Settings
 
