@@ -5,6 +5,12 @@ All notable changes to the **Monorepo Script Runner** extension are documented h
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-11-02
+
+### Changed
+
+- A finished script's terminal (still open with "press any key to close it") is reused by the next run of any script instead of opening a new one. Removed the `waitKey.js` wrapper; VS Code's native task reuse handles the key-to-close.
+
 ## [0.19.1] - 2026-10-26
 
 ### Fixed

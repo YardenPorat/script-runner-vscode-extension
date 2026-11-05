@@ -56,22 +56,17 @@ export function runScript(script: ScriptInfo): void {
         script.workspaceFolder,
         title,
         TASK_TYPE,
-        // Run through waitKey.js using VS Code's bundled Node, so the task itself
-        // waits for a key after the script ends and the terminal then closes.
-        new vscode.ProcessExecution(
-            process.execPath,
-            [path.join(__dirname, 'waitKey.js'), `${pm} run ${script.name}`],
-            { cwd: script.pkgDir, env: { ELECTRON_RUN_AS_NODE: '1' } }
-        )
+        new vscode.ShellExecution(`${pm} run ${script.name}`, { cwd: script.pkgDir })
     );
-    // Dedicated panel: each script gets its own terminal; it closes on the key
-    // press after the script finishes.
+    // Shared panel: any finished script's terminal (still open, showing "press
+    // any key to close it") is reused by the next run of any script. A
+    // still-running task keeps its own terminal.
     task.presentationOptions = {
-        panel: vscode.TaskPanelKind.Dedicated,
+        panel: vscode.TaskPanelKind.Shared,
         reveal: vscode.TaskRevealKind.Always,
         focus: false,
         clear: true,
-        close: true,
+        showReuseMessage: true,
     };
 
     void vscode.tasks.executeTask(task);
